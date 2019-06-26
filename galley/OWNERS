@@ -1,11 +1,6 @@
-reviewers:
-  - xiaolanz
-  - geeknoid
-  - ozevren
-  - cmluciano
-approvers:
-  - xiaolanz
-  - geeknoid
-  - ozevren
-  - cmluciano
+options:
+  no_parent_owners: true
 
+approvers:
+  - geeknoid
+  - ozevren

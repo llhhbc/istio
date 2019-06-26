@@ -1,53 +1,64 @@
-#!/usr/bin/env bash
+#!/bin/bash
+
+# Copyright 2018 Istio Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 die () {
   echo "ERROR: $*. Aborting." >&2
   exit 1
 }
 
-WD=$(dirname $0)
-WD=$(cd $WD; pwd)
-ROOT=$(dirname $WD)
-
-if [ ! -e $ROOT/Gopkg.lock ]; then
-  echo "Please run 'dep ensure' first"
-  exit 1
-fi
-
-GOGO_VERSION=$(sed -n '/gogo\/protobuf/,/\[\[projects/p' $ROOT/Gopkg.lock | grep 'version =' | sed -e 's/^[^\"]*\"//g' -e 's/\"//g')
-GENDOCS_VERSION=$(sed -n '/protoc-gen-docs/,/\[\[projects/p' $ROOT/Gopkg.lock | grep revision | sed -e 's/^[^\"]*\"//g' -e 's/\"//g')
+SCRIPTPATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+ROOTDIR="$(dirname "$SCRIPTPATH")"
 
 set -e
 
-outdir=$ROOT
-file=$ROOT
-protoc="$ROOT/bin/protoc-min-version-$GOGO_VERSION -version=3.5.0"
+outdir=$ROOTDIR
+file=$ROOTDIR
+protoc="$ROOTDIR/bin/protoc.sh"
 
-# BUGBUG: we override the use of protoc-min-version here, since using
-#         that tool prevents warnings from protoc-gen-docs from being
-#         displayed. If protoc-min-version gets fixed to allow this
-#         data though, then remove this override
-protoc="protoc"
-
-optimport=$ROOT
-template=$ROOT
+optimport=$ROOTDIR
+template=$ROOTDIR
 
 optproto=false
+optadapter=false
 opttemplate=false
+gendoc=true
+# extra flags are arguments that are passed to the underlying tool verbatim
+# Its value depend on the context of the main generation flag.
+# * for parent flag `-a`, the `-x` flag can provide additional options required by tool mixer/tool/mixgen adapter --help
+extraflags=""
 
-while getopts ':f:o:p:i:t:' flag; do
+while getopts ':f:o:p:i:t:a:d:x:' flag; do
   case "${flag}" in
-    f) $opttemplate && die "Cannot use proto file option (-f) with template file option (-t)"
+    f) $opttemplate && $optadapter && die "Cannot use proto file option (-f) with template file option (-t) or adapter option (-a)"
        optproto=true
-       file+="/${OPTARG}" 
+       file+="/${OPTARG}"
+       ;;
+    a) $opttemplate && $optproto && die "Cannot use proto adapter option (-a) with template file option (-t) or file option (-f)"
+       optadapter=true
+       file+="/${OPTARG}"
        ;;
     o) outdir="${OPTARG}" ;;
     p) protoc="${OPTARG}" ;;
+    x) extraflags="${OPTARG}" ;;
     i) optimport+=/"${OPTARG}" ;;
-    t) $optproto && die "Cannot use template file option (-t) with proto file option (-f)"
+    t) $optproto && $optadapter && die "Cannot use template file option (-t) with proto file option (-f) or adapter option (-a)"
        opttemplate=true
        template+="/${OPTARG}"
        ;;
+    d) gendoc="${OPTARG}" ;;
     *) die "Unexpected option ${flag}" ;;
   esac
 done
@@ -55,98 +66,27 @@ done
 # echo "outdir: ${outdir}"
 
 # Ensure expected GOPATH setup
-if [ $ROOT != "${GOPATH-$HOME/go}/src/istio.io/istio" ]; then
+if [ "$ROOTDIR" != "${GOPATH-$HOME/go}/src/istio.io/istio" ]; then
   die "Istio not found in GOPATH/src/istio.io/"
 fi
 
-PROTOC_PATH=$(which protoc)
- if [ -z "$PROTOC_PATH" ] ; then
-    die "protoc was not found, please install it first"
- fi
-
-GOGOPROTO_PATH=vendor/github.com/gogo/protobuf
-GOGOSLICK=protoc-gen-gogoslick
-GOGOSLICK_PATH=$ROOT/$GOGOPROTO_PATH/$GOGOSLICK
-GENDOCS=protoc-gen-docs
-GENDOCS_PATH=vendor/github.com/istio/tools/$GENDOCS
-
-if [ ! -e $ROOT/bin/$GOGOSLICK-$GOGO_VERSION ]; then
-echo "Building protoc-gen-gogoslick..."
-pushd $ROOT
-go build --pkgdir $GOGOSLICK_PATH -o $ROOT/bin/$GOGOSLICK-$GOGO_VERSION ./$GOGOPROTO_PATH/$GOGOSLICK
-popd
-echo "Done."
-fi
-
-if [ ! -e $ROOT/bin/$GENDOCS-$GENDOCS_VERSION ]; then
-echo "Building protoc-gen-docs..."
-pushd $ROOT/$GENDOCS_PATH
-go build --pkgdir $GENDOCS_PATH -o $ROOT/bin/$GENDOCS-$GENDOCS_VERSION
-popd
-echo "Done."
-fi
-
-PROTOC_MIN_VERSION=protoc-min-version
-MIN_VERSION_PATH=$ROOT/$GOGOPROTO_PATH/$PROTOC_MIN_VERSION
-
-if [ ! -e $ROOT/bin/$PROTOC_MIN_VERSION-$GOGO_VERSION ]; then
-echo "Building protoc-min-version..."
-pushd $ROOT
-go build --pkgdir $MIN_VERSION_PATH -o $ROOT/bin/$PROTOC_MIN_VERSION-$GOGO_VERSION ./$GOGOPROTO_PATH/$PROTOC_MIN_VERSION
-popd
-echo "Done."
-fi
-
-if [ ! -e ${ROOT}/vendor/istio.io/api/mixer/adapter/model/v1beta1/type.proto ]; then
-  echo "Pull down source protos from istio api..."
-  ISTIO_API_SHA=9d978d76653da8b7b4bd6421b7e8f9925d8c79ea
-  ISTIO_API_URL=https://raw.githubusercontent.com/istio/api/${ISTIO_API_SHA}
-
-  curl -fsS ${ISTIO_API_URL}/policy/v1beta1/cfg.proto > ${ROOT}/vendor/istio.io/api/policy/v1beta1/cfg.proto || die "can't fetch ${ISTIO_API_URL}/policy/v1beta1/cfg.proto"
-  curl -fsS ${ISTIO_API_URL}/policy/v1beta1/value_type.proto > ${ROOT}/vendor/istio.io/api/policy/v1beta1/value_type.proto || die "can't fetch ${ISTIO_API_URL}/policy/v1beta1/value_type.proto"
-  curl -fsS ${ISTIO_API_URL}/mixer/adapter/model/v1beta1/extensions.proto > ${ROOT}/vendor/istio.io/api/mixer/adapter/model/v1beta1/extensions.proto || die "can't fetch ${ISTIO_API_URL}/mixer/adapter/model/v1beta1/extensions.proto"
-  curl -fsS ${ISTIO_API_URL}/mixer/adapter/model/v1beta1/type.proto > ${ROOT}/vendor/istio.io/api/mixer/adapter/model/v1beta1/type.proto || die "can't fetch ${ISTIO_API_URL}/mixer/adapter/model/v1beta1/type.proto"
-fi
-
-GOOGLEAPIS_SHA=c8c975543a134177cc41b64cbbf10b88fe66aa1d
-GOOGLEAPIS_URL=https://raw.githubusercontent.com/googleapis/googleapis/${GOOGLEAPIS_SHA}
-
-if [ ! -e ${ROOT}/vendor/github.com/googleapis/googleapis ]; then
-echo "Pull down source protos from googleapis..."
-
-mkdir -p ${ROOT}/vendor/github.com/googleapis/googleapis
-
-# all the google_rpc protos
-mkdir -p ${ROOT}/vendor/github.com/googleapis/googleapis/google/rpc
-curl -sS ${GOOGLEAPIS_URL}/google/rpc/status.proto > ${ROOT}/vendor/github.com/googleapis/googleapis/google/rpc/status.proto
-curl -sS ${GOOGLEAPIS_URL}/google/rpc/code.proto > ${ROOT}/vendor/github.com/googleapis/googleapis/google/rpc/code.proto
-curl -sS ${GOOGLEAPIS_URL}/google/rpc/error_details.proto > ${ROOT}/vendor/github.com/googleapis/googleapis/google/rpc/error_details.proto
-fi
-
-imports=(
- "${ROOT}"
- "${ROOT}/vendor/istio.io/api"
- "${ROOT}/vendor/github.com/gogo/protobuf"
- "${ROOT}/vendor/github.com/gogo/protobuf/protobuf"
- "${ROOT}/vendor/github.com/googleapis/googleapis"
+IMPORTS=(
+  "--proto_path=${ROOTDIR}"
+  "--proto_path=${ROOTDIR}/vendor/istio.io/api"
+  "--proto_path=${ROOTDIR}/vendor/github.com/gogo/protobuf"
+  "--proto_path=${ROOTDIR}/vendor/github.com/gogo/googleapis"
+  "--proto_path=$optimport"
 )
-
-IMPORTS=""
-
-for i in "${imports[@]}"
-do
-  IMPORTS+="--proto_path=$i "
-done
-
-IMPORTS+="--proto_path=$optimport "
 
 mappings=(
   "gogoproto/gogo.proto=github.com/gogo/protobuf/gogoproto"
   "google/protobuf/any.proto=github.com/gogo/protobuf/types"
   "google/protobuf/duration.proto=github.com/gogo/protobuf/types"
-  "google/rpc/status.proto=istio.io/gogo-genproto/googleapis/google/rpc"
-  "google/rpc/code.proto=istio.io/gogo-genproto/googleapis/google/rpc"
-  "google/rpc/error_details.proto=istio.io/gogo-genproto/googleapis/google/rpc"
+  "google/protobuf/timestamp.proto=github.com/gogo/protobuf/types"
+  "google/protobuf/struct.proto=github.com/gogo/protobuf/types"
+  "google/rpc/status.proto=github.com/gogo/googleapis/google/rpc"
+  "google/rpc/code.proto=github.com/gogo/googleapis/google/rpc"
+  "google/rpc/error_details.proto=github.com/gogo/googleapis/google/rpc"
 )
 
 MAPPINGS=""
@@ -156,10 +96,9 @@ do
   MAPPINGS+="M$i,"
 done
 
-PLUGIN="--plugin=$ROOT/bin/protoc-gen-gogoslick-$GOGO_VERSION --gogoslick-${GOGO_VERSION}_out=plugins=grpc,$MAPPINGS:"
-PLUGIN+=$outdir
+PLUGIN="--gogoslick_out=plugins=grpc,$MAPPINGS:$outdir"
 
-GENDOCS_PLUGIN="--plugin=$ROOT/bin/$GENDOCS-$GENDOCS_VERSION --docs-${GENDOCS_VERSION}_out=warnings=true,mode=jekyll_html:"
+GENDOCS_PLUGIN="--docs_out=warnings=true,mode=html_fragment_with_front_matter:"
 GENDOCS_PLUGIN_FILE=$GENDOCS_PLUGIN$(dirname "${file}")
 GENDOCS_PLUGIN_TEMPLATE=$GENDOCS_PLUGIN$(dirname "${template}")
 
@@ -167,57 +106,109 @@ GENDOCS_PLUGIN_TEMPLATE=$GENDOCS_PLUGIN$(dirname "${template}")
 if [ "$opttemplate" = true ]; then
 
   template_mappings=(
-    "mixer/v1/config/descriptor/value_type.proto:istio.io/api/mixer/v1/config/descriptor"
-    "mixer/v1/template/extensions.proto:istio.io/api/mixer/v1/template"
-    "mixer/v1/template/standard_types.proto:istio.io/api/mixer/v1/template"
+    "google/protobuf/any.proto:github.com/gogo/protobuf/types"
     "gogoproto/gogo.proto:github.com/gogo/protobuf/gogoproto"
     "google/protobuf/duration.proto:github.com/gogo/protobuf/types"
+    "google/protobuf/timestamp.proto:github.com/gogo/protobuf/types"
+    "google/rpc/status.proto:github.com/gogo/googleapis/google/rpc"
+    "google/protobuf/struct.proto:github.com/gogo/protobuf/types"
   )
 
-  TMPL_GEN_MAP=""
+  TMPL_GEN_MAP=()
   TMPL_PROTOC_MAPPING=""
 
   for i in "${template_mappings[@]}"
   do
-    TMPL_GEN_MAP+="-m $i "
+    TMPL_GEN_MAP+=("-m" "$i")
     TMPL_PROTOC_MAPPING+="M${i/:/=},"
   done
 
-  TMPL_PLUGIN="--plugin=$ROOT/bin/protoc-gen-gogoslick-$GOGO_VERSION --gogoslick-${GOGO_VERSION}_out=$TMPL_PROTOC_MAPPING:"
-  TMPL_PLUGIN+=$outdir
+  TMPL_PLUGIN="--gogoslick_out=plugins=grpc,$TMPL_PROTOC_MAPPING:$outdir"
 
   descriptor_set="_proto.descriptor_set"
   handler_gen_go="_handler.gen.go"
-  instance_proto="_instance.proto"
+  handler_service="_handler_service.proto"
   pb_go=".pb.go"
 
   templateDS=${template/.proto/$descriptor_set}
   templateHG=${template/.proto/$handler_gen_go}
-  templateIP=${template/.proto/$instance_proto}
+  templateHSP=${template/.proto/$handler_service}
   templatePG=${template/.proto/$pb_go}
-
   # generate the descriptor set for the intermediate artifacts
-  DESCRIPTOR="--include_imports --include_source_info --descriptor_set_out=$templateDS"
-  err=`$protoc $DESCRIPTOR $IMPORTS $PLUGIN $GENDOCS_PLUGIN_TEMPLATE $template`
-  if [ ! -z "$err" ]; then
-    die "template generation failure: $err"; 
+  DESCRIPTOR=(
+    "--include_imports"
+    "--include_source_info"
+    "--descriptor_set_out=$templateDS"
+  )
+  if [ "$gendoc" = true ]; then
+    err=$($protoc "${DESCRIPTOR[@]}" "${IMPORTS[@]}" "$PLUGIN" "$GENDOCS_PLUGIN_TEMPLATE" "$template")
+  else
+    err=$($protoc "${DESCRIPTOR[@]}" "${IMPORTS[@]}" "$PLUGIN" "$template")
   fi
-  
-  go run $GOPATH/src/istio.io/istio/mixer/tools/codegen/cmd/mixgenproc/main.go $templateDS -o $templateHG -t $templateIP $TMPL_GEN_MAP  
-
-  err=`$protoc $IMPORTS $TMPL_PLUGIN $templateIP`
-  if [ ! -z "$err" ]; then 
-    die "template generation failure: $err"; 
+  if [ -n "$err" ]; then
+    die "template generation failure: $err";
   fi
 
-  rm $templateIP
-  rm $templatePG
+  go run "$GOPATH/src/istio.io/istio/mixer/tools/mixgen/main.go" api -t "$templateDS" --go_out "$templateHG" --proto_out "$templateHSP" "${TMPL_GEN_MAP[@]}"
+
+  err=$($protoc "${IMPORTS[@]}" "$TMPL_PLUGIN" "$templateHSP")
+  if [ -n "$err" ]; then
+    die "template generation failure: $err";
+  fi
+
+  templateSDS=${template/.proto/_handler_service.descriptor_set}
+  SDESCRIPTOR=(
+    "--include_imports"
+    "--include_source_info"
+    "--descriptor_set_out=$templateSDS"
+  )
+  err=$($protoc "${SDESCRIPTOR[@]}" "${IMPORTS[@]}" "$PLUGIN" "$templateHSP")
+  if [ -n "$err" ]; then
+    die "template generation failure: $err";
+  fi
+
+  templateYaml=${template/.proto/.yaml}
+  go run "$GOPATH/src/istio.io/istio/mixer/tools/mixgen/main.go" template -d "$templateSDS" -o "$templateYaml" -n "$(basename "$(dirname "${template}")")"
+
+  rm "$templatePG"
+
+  exit 0
+fi
+
+# handle adapter code generation
+if [ "$optadapter" = true ]; then
+  if [ "$gendoc" = true ]; then
+    err=$($protoc "${IMPORTS[@]}" "$PLUGIN" "$GENDOCS_PLUGIN_FILE" "$file")
+  else
+    err=$($protoc "${IMPORTS[@]}" "$PLUGIN" "$file")
+  fi
+  if [ -n "$err" ]; then
+    die "generation failure: $err";
+  fi
+
+  adapteCfdDS=${file}_descriptor
+  err=$($protoc "${IMPORTS[@]}" "$PLUGIN" --include_imports --include_source_info --descriptor_set_out="${adapteCfdDS}" "$file")
+  if [ -n "$err" ]; then
+  die "config generation failure: $err";
+  fi
+
+  IFS=" " read -r -a extraflags_array <<< "$extraflags"
+  go run "$GOPATH/src/istio.io/istio/mixer/tools/mixgen/main.go" adapter -c "$adapteCfdDS" -o "$(dirname "${file}")" "${extraflags_array[@]}"
 
   exit 0
 fi
 
 # handle simple protoc-based generation
-err=`$protoc $IMPORTS $PLUGIN $GENDOCS_PLUGIN_FILE $file`
-if [ ! -z "$err" ]; then 
-  die "generation failure: $err"; 
+if [ "$gendoc" = true ]; then
+  err=$($protoc "${IMPORTS[@]}" "$PLUGIN" "$GENDOCS_PLUGIN_FILE" "$file")
+else
+  err=$($protoc "${IMPORTS[@]}" "$PLUGIN" "$file")
+fi
+if [ -n "$err" ]; then
+  die "generation failure: $err";
+fi
+
+err=$($protoc "${IMPORTS[@]}" "$PLUGIN" --include_imports --include_source_info --descriptor_set_out="${file}_descriptor" "$file")
+if [ -n "$err" ]; then
+die "config generation failure: $err";
 fi

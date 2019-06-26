@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors.
+// Copyright 2018 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,9 @@
 // Package redisquota provides a quota implementation with redis as backend.
 // The prerequisite is to have a redis server running.
 //
-//go:generate $GOPATH/src/istio.io/istio/bin/mixer_codegen.sh -f mixer/adapter/redisquota/config/config.proto
+//
+// nolint: lll
+//go:generate $GOPATH/src/istio.io/istio/bin/mixer_codegen.sh -a mixer/adapter/redisquota/config/config.proto -x "-n redisquota -t quota"
 package redisquota // import "istio.io/istio/mixer/adapter/redisquota"
 
 import (
@@ -29,6 +31,7 @@ import (
 
 	"github.com/go-redis/redis"
 
+	"istio.io/istio/mixer/adapter/metadata"
 	"istio.io/istio/mixer/adapter/redisquota/config"
 	"istio.io/istio/mixer/pkg/adapter"
 	"istio.io/istio/mixer/pkg/status"
@@ -70,6 +73,10 @@ type (
 		logger adapter.Logger
 	}
 )
+
+// ensure our types implement the requisite interfaces
+var _ quota.HandlerBuilder = &builder{}
+var _ quota.Handler = &handler{}
 
 ///////////////// Configuration Methods ///////////////
 
@@ -286,19 +293,18 @@ func (h *handler) getKeyAndQuotaAmount(instance *quota.Instance, quota *config.P
 
 	for idx := range quota.Overrides {
 		if matchDimensions(&quota.Overrides[idx].Dimensions, &instance.Dimensions) {
-			if h.logger.VerbosityLevel(4) {
-				h.logger.Infof("quota override: %v selected for %v", quota.Overrides[idx], *instance)
-			}
+			h.logger.Debugf("quota override: %v selected for %v", quota.Overrides[idx], *instance)
 
 			if hash, ok := h.dimensionHash[&quota.Overrides[idx].Dimensions]; ok {
 				// override key and max amount
 				key = key + "-" + hash
 				maxAmount = quota.Overrides[idx].MaxAmount
-			} else {
-				// This should not be happen
-				return "", 0, fmt.Errorf("quota override dimension hash lookup failed: %v in %v",
-					h.limits[instance.Name].Overrides[idx].Dimensions, h.dimensionHash)
+				return key, maxAmount, nil
 			}
+
+			// This should not be happen
+			return "", 0, fmt.Errorf("quota override dimension hash lookup failed: %v in %v",
+				h.limits[instance.Name].Overrides[idx].Dimensions, h.dimensionHash)
 		}
 	}
 
@@ -318,9 +324,7 @@ func (h *handler) HandleQuota(context context.Context, instance *quota.Instance,
 				return adapter.QuotaResult{}, nil
 			}
 
-			if h.logger.VerbosityLevel(4) {
-				h.logger.Infof("key: %v maxAmount: %v", key, maxAmount)
-			}
+			h.logger.Debugf("key: %v maxAmount: %v", key, maxAmount)
 
 			// execute lua algorithm script
 			result, err := script.Run(
@@ -329,7 +333,7 @@ func (h *handler) HandleQuota(context context.Context, instance *quota.Instance,
 					key + ".meta", // KEY[1]
 					key + ".data", // KEY[2]
 				},
-				maxAmount, // ARGV[1] credit
+				maxAmount,                               // ARGV[1] credit
 				limit.GetValidDuration().Nanoseconds(),  // ARGV[2] window length
 				limit.GetBucketDuration().Nanoseconds(), // ARGV[3] bucket length
 				args.BestEffort,                         // ARGV[4] best effort
@@ -372,19 +376,9 @@ func (h handler) Close() error {
 
 // GetInfo returns the Info associated with this adapter implementation.
 func GetInfo() adapter.Info {
-	return adapter.Info{
-		Name:        "redisquota",
-		Impl:        "istio.io/mixer/adapter/redisquota",
-		Description: "Redis-based quotas.",
-		SupportedTemplates: []string{
-			quota.TemplateName,
-		},
-		DefaultConfig: &config.Params{
-			RedisServerUrl:     "localhost:6379",
-			ConnectionPoolSize: 10,
-		},
-		NewBuilder: func() adapter.HandlerBuilder { return &builder{} },
-	}
+	info := metadata.GetInfo("redisquota")
+	info.NewBuilder = func() adapter.HandlerBuilder { return &builder{} }
+	return info
 }
 
 ///////////////////////////////////////////////////////

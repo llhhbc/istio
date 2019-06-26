@@ -1,31 +1,39 @@
+{{- range $key, $spec := .Values }}
+{{- if or (eq $key "policy") (eq $key "telemetry") }}
+{{- if $spec.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: istio-mixer
+  name: istio-{{ $key }}
+  namespace: {{ $.Release.Namespace }}
+  annotations:
+   networking.istio.io/exportTo: "*"
   labels:
-    app: {{ template "mixer.name" . }}
-    chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
-    release: {{ .Release.Name }}
-    heritage: {{ .Release.Service }}
+    app: {{ template "mixer.name" $ }}
+    chart: {{ template "mixer.chart" $ }}
+    heritage: {{ $.Release.Service }}
+    release: {{ $.Release.Name }}
     istio: mixer
 spec:
   ports:
-  - name: tcp-plain
+  - name: grpc-mixer
     port: 9091
-  - name: tcp-mtls
+  - name: grpc-mixer-mtls
     port: 15004
-  - name: http-health
-    port: 9093
-  - name: configapi
-    port: 9094
-  - name: statsd-prom
-    port: 9102
-  - name: statsd-udp
-    port: 9125
-    protocol: UDP
+  - name: http-monitoring
+    port: {{ $.Values.global.monitoringPort }}
+{{- if eq $key "telemetry" }}
   - name: prometheus
     port: 42422
+{{- if $spec.sessionAffinityEnabled }}
+  sessionAffinity: ClientIP
+{{- end }}
+{{- end }}
   selector:
-    app: istio-mixer
-    release: {{ .Release.Name }}
     istio: mixer
+    istio-mixer-type: {{ $key }}
+---
+{{- end }}
+{{- end }}
+{{- end }}
+

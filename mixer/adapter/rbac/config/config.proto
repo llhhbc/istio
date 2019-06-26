@@ -14,12 +14,9 @@
 
 syntax = "proto3";
 
-// $title: RBAC
-// $overview: Adapter that exposes Istio's Role-Based Access Control model.
-// $location: https://istio.io/docs/reference/config/adapters/rbac.html
-
-// The `rbac` adapter provides Role-Based Access Control (RBAC) functionality for
-// for services within the Istio mesh.
+// The `rbac` adapter is deprecated by native RBAC implemented in Envoy proxy.
+// See https://istio.io/docs/concepts/security/#enabling-authorization for enabling
+// the native RBAC with your existing service role and service role binding.
 package adapter.rbac.config;
 
 import "google/protobuf/duration.proto";
@@ -39,12 +36,14 @@ option (gogoproto.gostring_all) = false;
 //
 // ```yaml
 // apiVersion: "config.istio.io/v1alpha2"
-// kind: rbac
+// kind: handler
 // metadata:
 //   name: rbachandler
 //   namespace: istio-system
 // spec:
-//   config_store_url: "fs:///tmp/testdata/config"
+//   compiledAdapter: rbac
+//   params:
+//     config_store_url: "fs:///tmp/testdata/config"
 // ```
 message Params {
   // URL for the config store. It is used to initiate a new Store instance.

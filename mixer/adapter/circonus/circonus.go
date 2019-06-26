@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:generate $GOPATH/src/istio.io/istio/bin/mixer_codegen.sh -f mixer/adapter/circonus/config/config.proto
+// nolint: lll
+//go:generate $GOPATH/src/istio.io/istio/bin/mixer_codegen.sh -a mixer/adapter/circonus/config/config.proto -x "-n circonus -t metric"
 
 package circonus
 
@@ -21,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"log" //nolint:adapterlinter
+
 	"net/url"
 	"time"
 
@@ -28,6 +30,7 @@ import (
 	"github.com/circonus-labs/circonus-gometrics/checkmgr"
 
 	"istio.io/istio/mixer/adapter/circonus/config"
+	"istio.io/istio/mixer/adapter/metadata"
 	"istio.io/istio/mixer/pkg/adapter"
 	"istio.io/istio/mixer/template/metric"
 )
@@ -191,15 +194,9 @@ func (h *handler) Close() error {
 
 // GetInfo returns the adapter.Info specific to this adapter.
 func GetInfo() adapter.Info {
-	return adapter.Info{
-		Name:        "circonus",
-		Description: "Emit metrics to Circonus.com monitoring endpoint",
-		SupportedTemplates: []string{
-			metric.TemplateName,
-		},
-		NewBuilder:    func() adapter.HandlerBuilder { return &builder{} },
-		DefaultConfig: &config.Params{SubmissionUrl: "", SubmissionInterval: 10 * time.Second},
-	}
+	info := metadata.GetInfo("circonus")
+	info.NewBuilder = func() adapter.HandlerBuilder { return &builder{} }
+	return info
 }
 
 // logToEnvLogger converts CGM log package writes to env.Logger()
@@ -209,7 +206,7 @@ func (b logToEnvLogger) Write(msg []byte) (int, error) {
 	} else if bytes.HasPrefix(msg, []byte("[WARN]")) {
 		b.env.Logger().Warningf(string(msg))
 	} else if bytes.HasPrefix(msg, []byte("[DEBUG]")) {
-		b.env.Logger().Infof(string(msg))
+		b.env.Logger().Debugf(string(msg))
 	} else {
 		b.env.Logger().Infof(string(msg))
 	}

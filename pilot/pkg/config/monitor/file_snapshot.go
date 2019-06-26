@@ -22,7 +22,7 @@ import (
 
 	"istio.io/istio/pilot/pkg/config/kube/crd"
 	"istio.io/istio/pilot/pkg/model"
-	"istio.io/istio/pkg/log"
+	"istio.io/pkg/log"
 )
 
 var (
@@ -61,9 +61,9 @@ func NewFileSnapshot(root string, descriptor model.ConfigDescriptor) *FileSnapsh
 	return snapshot
 }
 
-// ReadFile parses files in the root directory and returns a sorted slice of
+// ReadConfigFiles parses files in the root directory and returns a sorted slice of
 // eligible model.Config. This can be used as a configFunc when creating a Monitor.
-func (f *FileSnapshot) ReadFile() []*model.Config {
+func (f *FileSnapshot) ReadConfigFiles() ([]*model.Config, error) {
 	var result []*model.Config
 
 	err := filepath.Walk(f.root, func(path string, info os.FileInfo, err error) error {
@@ -98,7 +98,7 @@ func (f *FileSnapshot) ReadFile() []*model.Config {
 
 	// Sort by the config IDs.
 	sort.Sort(byKey(result))
-	return result
+	return result, err
 }
 
 // parseInputs is identical to crd.ParseInputs, except that it returns an array of config pointers.

@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	istio_mixer_v1 "istio.io/api/mixer/v1"
 	"istio.io/istio/mixer/pkg/attribute"
@@ -111,11 +112,9 @@ func run(b benchmark, setup *Setup, settings *Settings, coprocess bool) {
 			return
 		}
 		defer func() { _ = cmd.Process.Kill() }()
-	} else {
-		if _, err = NewClientServer(controller.location()); err != nil {
-			b.fatalf("agent creation failed: '%v'", err)
-			return
-		}
+	} else if _, err = NewClientServer(controller.location()); err != nil {
+		b.fatalf("agent creation failed: '%v'", err)
+		return
 	}
 
 	controller.waitForClient()
@@ -126,7 +125,7 @@ func run(b benchmark, setup *Setup, settings *Settings, coprocess bool) {
 	}
 
 	// Do a test run first to see if there are any errors.
-	if err = controller.runClients(1); err != nil {
+	if err = controller.runClients(1, time.Duration(0)); err != nil {
 		b.fatalf("error during test client run: '%v'", err)
 	}
 
@@ -135,9 +134,8 @@ func run(b benchmark, setup *Setup, settings *Settings, coprocess bool) {
 		name = "CoProc"
 	}
 	b.run(name, func(bb benchmark) {
-		_ = controller.runClients(bb.n())
+		_ = controller.runClients(bb.n(), time.Duration(0))
 	})
-	b.logf("completed running test: %s", b.name())
 
 	// Even though we have a deferred close for controller, do it explicitly before leaving control to perform
 	// graceful close of clients during teardown.
@@ -168,15 +166,20 @@ func runDispatcherOnly(b benchmark, setup *Setup, settings *Settings) {
 		globalDict[list[i]] = int32(i)
 	}
 
-	requests := setup.Load.createRequestProtos(setup.Config)
+	// there has to be just 1 load for InProcessBypassGrpc case
+	if len(setup.Loads) != 1 {
+		b.fatalf("for `InProcessBypassGrpc`, load must contain exactly 1 entry")
+		return
+	}
+	requests := setup.Loads[0].createRequestProtos()
 	bags := make([]attribute.Bag, len(requests)) // precreate bags to avoid polluting allocation data.
 	for i, r := range requests {
 		switch req := r.(type) {
 		case *istio_mixer_v1.ReportRequest:
-			bags[i] = attribute.NewProtoBag(&req.Attributes[0], globalDict, attribute.GlobalList())
+			bags[i] = attribute.GetProtoBag(&req.Attributes[0], globalDict, attribute.GlobalList())
 
 		case *istio_mixer_v1.CheckRequest:
-			bags[i] = attribute.NewProtoBag(&req.Attributes, globalDict, attribute.GlobalList())
+			bags[i] = attribute.GetProtoBag(&req.Attributes, globalDict, attribute.GlobalList())
 
 		default:
 			b.fatalf("unknown request type: %v", r)
@@ -189,7 +192,12 @@ func runDispatcherOnly(b benchmark, setup *Setup, settings *Settings) {
 
 		switch r.(type) {
 		case *istio_mixer_v1.ReportRequest:
-			err = dispatcher.Report(context.Background(), bag)
+			r := dispatcher.GetReporter(context.Background())
+			err = r.Report(bag)
+			if err == nil {
+				err = r.Flush()
+			}
+			r.Done()
 
 		case *istio_mixer_v1.CheckRequest:
 			_, err = dispatcher.Check(context.Background(), bag)
@@ -207,7 +215,10 @@ func runDispatcherOnly(b benchmark, setup *Setup, settings *Settings) {
 
 				switch r.(type) {
 				case *istio_mixer_v1.ReportRequest:
-					_ = dispatcher.Report(context.Background(), bag)
+					r := dispatcher.GetReporter(context.Background())
+					_ = r.Report(bag)
+					_ = r.Flush()
+					r.Done()
 
 				case *istio_mixer_v1.CheckRequest:
 					_, _ = dispatcher.Check(context.Background(), bag)

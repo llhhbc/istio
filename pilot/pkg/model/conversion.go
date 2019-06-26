@@ -19,12 +19,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 
 	"github.com/ghodss/yaml"
-	gogojsonpb "github.com/gogo/protobuf/jsonpb"
-	gogoproto "github.com/gogo/protobuf/proto"
-	"github.com/golang/protobuf/jsonpb"
-	"github.com/golang/protobuf/proto"
+	"github.com/gogo/protobuf/jsonpb"
+	"github.com/gogo/protobuf/proto"
 	multierror "github.com/hashicorp/go-multierror"
 	yaml2 "gopkg.in/yaml.v2"
 )
@@ -33,47 +32,25 @@ import (
 func (ps *ProtoSchema) Make() (proto.Message, error) {
 	pbt := proto.MessageType(ps.MessageName)
 	if pbt == nil {
-		// goproto and gogoproto maintain their own separate registry
-		// of linked proto files. istio.io/api/proxy protobufs use
-		// goproto and istio.io/api/mixer protobufs use
-		// gogoproto. Until use of goproto vs. gogoproto is reconciled
-		// we need to check both registries when dealing to handle
-		// proxy and mixerclient types.
-		//
-		// NOTE: this assumes that protobuf type names are unique
-		// across goproto and gogoproto.
-		pbt = gogoproto.MessageType(ps.MessageName)
-		if pbt == nil {
-			return nil, fmt.Errorf("unknown type %q", ps.MessageName)
-		}
+		return nil, fmt.Errorf("unknown type %q", ps.MessageName)
 	}
 	return reflect.New(pbt.Elem()).Interface().(proto.Message), nil
 }
 
-func isGogoProto(in proto.Message) bool {
-	return gogoproto.MessageName(in) != ""
-}
-
 // ToJSON marshals a proto to canonical JSON
 func ToJSON(msg proto.Message) (string, error) {
+	return ToJSONWithIndent(msg, "")
+}
+
+// ToJSONWithIndent marshals a proto to canonical JSON with pretty printed string
+func ToJSONWithIndent(msg proto.Message, indent string) (string, error) {
 	if msg == nil {
 		return "", errors.New("unexpected nil message")
 	}
 
 	// Marshal from proto to json bytes
-	var out string
-	var err error
-	if isGogoProto(msg) {
-		m := gogojsonpb.Marshaler{}
-		out, err = m.MarshalToString(msg)
-	} else {
-		m := jsonpb.Marshaler{}
-		out, err = m.MarshalToString(msg)
-	}
-	if err != nil {
-		return "", err
-	}
-	return out, nil
+	m := jsonpb.Marshaler{Indent: indent}
+	return m.MarshalToString(msg)
 }
 
 // ToYAML marshals a proto to canonical YAML
@@ -116,12 +93,17 @@ func (ps *ProtoSchema) FromJSON(js string) (proto.Message, error) {
 	return pb, nil
 }
 
-// ApplyJSON unmarshals a JSON string into a proto message
+// ApplyJSON unmarshals a JSON string into a proto message.
 func ApplyJSON(js string, pb proto.Message) error {
-	if isGogoProto(pb) {
-		return gogojsonpb.UnmarshalString(js, pb)
+	reader := strings.NewReader(js)
+	m := jsonpb.Unmarshaler{}
+	if err := m.Unmarshal(reader, pb); err != nil {
+		log.Debugf("Failed to decode proto: %q. Trying decode with AllowUnknownFields=true", err)
+		m.AllowUnknownFields = true
+		reader.Reset(js)
+		return m.Unmarshal(reader, pb)
 	}
-	return jsonpb.UnmarshalString(js, pb)
+	return nil
 }
 
 // FromYAML converts a canonical YAML to a proto message
@@ -136,7 +118,8 @@ func (ps *ProtoSchema) FromYAML(yml string) (proto.Message, error) {
 	return pb, nil
 }
 
-// ApplyYAML unmarshals a YAML string into a proto message
+// ApplyYAML unmarshals a YAML string into a proto message.
+// Unknown fields are allowed.
 func ApplyYAML(yml string, pb proto.Message) error {
 	js, err := yaml.YAMLToJSON([]byte(yml))
 	if err != nil {

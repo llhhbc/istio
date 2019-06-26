@@ -22,10 +22,11 @@ import (
 
 	api_mixer_v1 "istio.io/api/mixer/v1"
 	"istio.io/istio/mixer/pkg/adapter"
-	"istio.io/istio/mixer/pkg/attribute"
+	attr "istio.io/istio/mixer/pkg/attribute"
 	"istio.io/istio/mixer/pkg/config/storetest"
 	"istio.io/istio/mixer/pkg/server"
 	"istio.io/istio/mixer/template"
+	"istio.io/pkg/attribute"
 )
 
 const (
@@ -41,9 +42,9 @@ spec:
       value_type: STRING
     source.groups:
       value_type: STRING
-    target.namespace:
+    destination.namespace:
       value_type: STRING
-    target.service:
+    destination.service:
       value_type: STRING
     request.method:
       value_type: STRING
@@ -51,7 +52,7 @@ spec:
       value_type: STRING
     source.service:
       value_type: STRING
-    target.service:
+    destination.service:
       value_type: STRING
 
 ---
@@ -81,13 +82,13 @@ spec:
     user: source.uid | ""
     groups: source.groups | ""
   action:
-    namespace: target.namespace | "default"
-    service: target.service | ""
+    namespace: destination.namespace | "default"
+    service: destination.service | ""
     method: request.method | ""
     path: request.path | ""
     properties:
       source: source.service | ""
-      target: target.service | ""
+      target: destination.service | ""
 ---
 
 apiVersion: "config.istio.io/v1alpha2"
@@ -210,50 +211,45 @@ func TestServer(t *testing.T) {
 	}{
 		"Not important API": {
 			attrs: map[string]interface{}{
-				"destination.service": "svc.cluster.local",
 				"source.uid":          "janet",
 				"request.path":        "/detail/alice",
-				"target.service":      "landing_page",
+				"destination.service": "landing_page",
 				"source.service":      "details",
 			},
 			expectedStatusCode: 0,
 		},
 		"Self permission": {
 			attrs: map[string]interface{}{
-				"destination.service": "svc.cluster.local",
 				"source.uid":          "janet",
 				"request.path":        "/detail/janet",
-				"target.service":      "landing_page",
+				"destination.service": "landing_page",
 				"source.service":      "details",
 			},
 			expectedStatusCode: 0,
 		},
 		"Manager permission": {
 			attrs: map[string]interface{}{
-				"destination.service": "svc.cluster.local",
 				"source.uid":          "janet",
 				"request.path":        "/reviews/alice",
-				"target.service":      "landing_page",
+				"destination.service": "landing_page",
 				"source.service":      "details",
 			},
 			expectedStatusCode: 0,
 		},
 		"HR permission": {
 			attrs: map[string]interface{}{
-				"destination.service": "svc.cluster.local",
 				"source.uid":          "ken",
 				"request.path":        "/reviews/janet",
-				"target.service":      "landing_page",
+				"destination.service": "landing_page",
 				"source.service":      "details",
 			},
 			expectedStatusCode: 0,
 		},
 		"Denied request": {
 			attrs: map[string]interface{}{
-				"destination.service": "svc.cluster.local",
 				"source.uid":          "janet",
 				"request.path":        "/detail/ken",
-				"target.service":      "landing_pages",
+				"destination.service": "landing_pages",
 				"source.service":      "invalid",
 			},
 			expectedStatusCode: 7,
@@ -262,13 +258,12 @@ func TestServer(t *testing.T) {
 
 	for id, c := range cases {
 		requestBag := attribute.GetMutableBag(nil)
-		requestBag.Set(args.ConfigIdentityAttribute, args.ConfigIdentityAttributeDomain)
 
 		for k, v := range c.attrs {
 			requestBag.Set(k, v)
 		}
 		var attrProto api_mixer_v1.CompressedAttributes
-		requestBag.ToProto(&attrProto, nil, 0)
+		attr.ToProto(requestBag, &attrProto, nil, 0)
 
 		req := &api_mixer_v1.CheckRequest{
 			Attributes: attrProto,

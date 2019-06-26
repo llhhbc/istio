@@ -19,12 +19,12 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 
-	"istio.io/istio/pkg/log"
-	"istio.io/istio/tests/integration/framework"
+	"istio.io/istio/tests/integration_old/framework"
+	"istio.io/pkg/log"
 )
 
 const (
-	istioCaSelfSigned = "istio-ca-self-signed"
+	citadelSelfSigned = "citadel-self-signed"
 )
 
 type (
@@ -77,8 +77,8 @@ func (env *SecretTestEnv) GetComponents() []framework.Component {
 			NewKubernetesPod(
 				env.ClientSet,
 				env.NameSpace,
-				istioCaSelfSigned,
-				fmt.Sprintf("%v/istio-ca:%v", env.Hub, env.Tag),
+				citadelSelfSigned,
+				fmt.Sprintf("%v/citadel:%v", env.Hub, env.Tag),
 				[]string{
 					"/usr/local/bin/istio_ca",
 				},

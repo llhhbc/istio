@@ -19,8 +19,8 @@ import (
 
 	"k8s.io/client-go/kubernetes"
 
-	"istio.io/istio/pkg/log"
-	"istio.io/istio/tests/integration/framework"
+	"istio.io/istio/tests/integration_old/framework"
+	"istio.io/pkg/log"
 )
 
 type (
@@ -37,7 +37,7 @@ type (
 )
 
 const (
-	istioCaSelfSignedShortTTL = "istio-ca-self-signed-short-ttl"
+	citadelSelfSignedShortTTL = "citadel-self-signed-short-ttl"
 )
 
 // NewCertRotationTestEnv creates the environment instance
@@ -77,8 +77,8 @@ func (env *CertRotationTestEnv) GetComponents() []framework.Component {
 			NewKubernetesPod(
 				env.ClientSet,
 				env.NameSpace,
-				istioCaSelfSignedShortTTL,
-				fmt.Sprintf("%s/istio-ca:%s", env.Hub, env.Tag),
+				citadelSelfSignedShortTTL,
+				fmt.Sprintf("%s/citadel:%s", env.Hub, env.Tag),
 				[]string{
 					"/usr/local/bin/istio_ca",
 				},

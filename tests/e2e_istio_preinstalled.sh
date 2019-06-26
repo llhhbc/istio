@@ -29,17 +29,13 @@ set -o pipefail
 [[  $1 == "all" || $1 == "bookinfo" || $1 == "mixer" || $1 == "simple" ]] || { echo "$1 is not a legal test name"; exit 1; }
 
 declare -a tests
-[[  $1 == "all" ]] && tests=("bookinfo" "mixer" "simple") || tests=($1)
+[[  $1 == "all" ]] && tests=("bookinfo" "mixer" "simple") || tests=("$1")
 
-HUB=gcr.io/istio-testing
+cd "$(dirname "${BASH_SOURCE[0]}")"/..
+git checkout "${TAG}"
+make init
 
-cd ${WORKSPACE}/github.com/istio/istio
-TAG=`git rev-parse HEAD`
-
-for t in ${tests[@]}; do
-  go test -v -timeout 20m ./tests/e2e/tests/${t} -args \
-  --skip_setup --namespace istio-system \
-  --mixer_tag ${TAG} --pilot_tag ${TAG} --proxy_tag ${TAG} --ca_tag ${TAG} \
-  --mixer_hub ${HUB} --pilot_hub ${HUB} --proxy_hub ${HUB} --ca_hub ${HUB} \
-  --istioctl_url https://storage.googleapis.com/istio-artifacts/pilot/${TAG}/artifacts/istioctl
+for t in "${tests[@]}"; do
+  make "e2e_${t}" E2E_ARGS="--skip_setup --namespace=istio-system --istioctl_url=https://storage.googleapis.com/istio-artifacts/pilot/${TAG}/artifacts/istioctl"
 done
+

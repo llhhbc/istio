@@ -20,7 +20,6 @@ import (
 
 	"github.com/hashicorp/consul/api"
 
-	meshconfig "istio.io/api/mesh/v1alpha1"
 	"istio.io/istio/pilot/pkg/model"
 )
 
@@ -36,7 +35,7 @@ var (
 		{"http2", 83, model.ProtocolHTTP2},
 		{"grpc", 84, model.ProtocolGRPC},
 		{"udp", 85, model.ProtocolUDP},
-		{"", 86, model.ProtocolHTTP},
+		{"", 86, model.ProtocolTCP},
 	}
 
 	goodLabels = []string{
@@ -93,7 +92,7 @@ func TestConvertInstance(t *testing.T) {
 		ServiceAddress: ip,
 		ServicePort:    port,
 		Datacenter:     dc,
-		NodeMeta:       map[string]string{protocolTagName: protocol},
+		ServiceMeta:    map[string]string{protocolTagName: protocol},
 	}
 
 	out := convertInstance(&consulServiceInst)
@@ -110,8 +109,8 @@ func TestConvertInstance(t *testing.T) {
 		t.Errorf("convertInstance() => %v, want %v", out.Endpoint.ServicePort.Port, port)
 	}
 
-	if out.AvailabilityZone != dc {
-		t.Errorf("convertInstance() => %v, want %v", out.AvailabilityZone, dc)
+	if out.Endpoint.Locality != dc {
+		t.Errorf("convertInstance() => %v, want %v", out.Endpoint.Locality, dc)
 	}
 
 	if out.Endpoint.Address != ip {
@@ -170,7 +169,7 @@ func TestConvertService(t *testing.T) {
 			},
 			ServiceAddress: "172.19.0.11",
 			ServicePort:    9080,
-			NodeMeta:       map[string]string{protocolTagName: "udp"},
+			ServiceMeta:    map[string]string{protocolTagName: "udp"},
 		},
 		{
 			Node:        "istio-node",
@@ -182,7 +181,7 @@ func TestConvertService(t *testing.T) {
 			},
 			ServiceAddress: "172.19.0.12",
 			ServicePort:    9080,
-			NodeMeta:       map[string]string{protocolTagName: "udp"},
+			ServiceMeta:    map[string]string{protocolTagName: "udp"},
 		},
 	}
 
@@ -200,16 +199,5 @@ func TestConvertService(t *testing.T) {
 	if len(out.Ports) != 1 {
 		t.Errorf("convertService() incorrect # of ports => %v, want %v",
 			len(out.Ports), 1)
-	}
-}
-
-func TestExtractAuthenticationPolicy(t *testing.T) {
-	// TODO: https://github.com/istio/istio/issues/3338
-	// This test will change when 'consul label' is used in func extractAuthenticationPolicy to return authenticationPolicy
-	for _, tt := range protocols {
-		out := extractAuthenticationPolicy(tt.port, tt.name)
-		if out != meshconfig.AuthenticationPolicy_INHERIT {
-			t.Errorf("extractAuthenticationPolicy(%v, %q) => %q, want %q", tt.port, tt.name, out, meshconfig.AuthenticationPolicy_INHERIT)
-		}
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2017 the Istio Authors.
+// Copyright 2017 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import (
 
 	monitoring "cloud.google.com/go/monitoring/apiv3"
 	"github.com/golang/protobuf/ptypes"
-	gax "github.com/googleapis/gax-go"
+	gax "github.com/googleapis/gax-go/v2"
 	xcontext "golang.org/x/net/context"
 	labelpb "google.golang.org/genproto/googleapis/api/label"
 	metricpb "google.golang.org/genproto/googleapis/api/metric"
@@ -47,7 +47,7 @@ import (
 type (
 
 	// createClientFunc abstracts over the creation of the stackdriver client to enable network-less testing.
-	createClientFunc func(*config.Params) (*monitoring.MetricClient, error)
+	createClientFunc func(*config.Params, adapter.Logger) (*monitoring.MetricClient, error)
 
 	// pushFunc abstracts over client.CreateTimeSeries for testing
 	pushFunc func(ctx xcontext.Context, req *monitoringpb.CreateTimeSeriesRequest, opts ...gax.CallOption) error
@@ -56,6 +56,7 @@ type (
 		createClient createClientFunc
 		metrics      map[string]*metric.Type
 		cfg          *config.Params
+		mg           helper.MetadataGenerator
 	}
 
 	info struct {
@@ -68,17 +69,30 @@ type (
 		l   adapter.Logger
 		now func() time.Time // used to control time in tests
 
-		projectID  string
+		md         helper.Metadata
 		metricInfo map[string]info
 		client     bufferedClient
 		// We hold a ref for cleanup during Close()
 		ticker *time.Ticker
+		quit   chan struct{}
 	}
 )
 
 const (
 	// From https://github.com/GoogleCloudPlatform/golang-samples/blob/master/monitoring/custommetric/custommetric.go
 	customMetricPrefix = "custom.googleapis.com/"
+
+	// To limit the time series included in each CreateTimeSeries API call.
+	timeSeriesBatchLimit = 200
+
+	// To limit the retry attempts for time series that are failed to push.
+	maxRetryAttempt = 3
+
+	// Size of time series buffer that would trigger time series merging.
+	mergeBufferTrigger = 10000
+
+	// microsecond to introduce a small difference between start time and end time of time series interval.
+	usec = int32(1 * time.Microsecond)
 )
 
 var (
@@ -104,12 +118,12 @@ var (
 )
 
 // NewBuilder returns a builder implementing the metric.HandlerBuilder interface.
-func NewBuilder() metric.HandlerBuilder {
-	return &builder{createClient: createClient}
+func NewBuilder(mg helper.MetadataGenerator) metric.HandlerBuilder {
+	return &builder{createClient: createClient, mg: mg}
 }
 
-func createClient(cfg *config.Params) (*monitoring.MetricClient, error) {
-	return monitoring.NewMetricClient(context.Background(), helper.ToOpts(cfg)...)
+func createClient(cfg *config.Params, logger adapter.Logger) (*monitoring.MetricClient, error) {
+	return monitoring.NewMetricClient(context.Background(), helper.ToOpts(cfg, logger)...)
 }
 
 func (b *builder) SetMetricTypes(metrics map[string]*metric.Type) {
@@ -126,6 +140,11 @@ func (b *builder) Validate() *adapter.ConfigErrors {
 // NewMetricsAspect provides an implementation for adapter.MetricsBuilder.
 func (b *builder) Build(ctx context.Context, env adapter.Env) (adapter.Handler, error) {
 	cfg := b.cfg
+	md := b.mg.GenerateMetadata()
+	if cfg.ProjectId == "" {
+		// Try to fill project ID if it is not provided with metadata.
+		cfg.ProjectId = md.ProjectID
+	}
 	types := make(map[string]info, len(b.metrics))
 	for name, t := range b.metrics {
 		i, found := cfg.MetricInfo[name]
@@ -133,9 +152,13 @@ func (b *builder) Build(ctx context.Context, env adapter.Env) (adapter.Handler, 
 			env.Logger().Warningf("No stackdriver info found for metric %s, skipping it", name)
 			continue
 		}
+		mt := i.MetricType
+		if mt == "" {
+			mt = customMetricType(name)
+		}
 		// TODO: do we want to make sure that the definition conforms to stackdrvier requirements? Really that needs to happen during config validation
 		types[name] = info{
-			ttype: metricType(name),
+			ttype: mt,
 			vtype: t.Value,
 			minfo: i,
 		}
@@ -147,44 +170,50 @@ func (b *builder) Build(ctx context.Context, env adapter.Env) (adapter.Handler, 
 	}
 
 	ticker := time.NewTicker(cfg.PushInterval)
-
+	quit := make(chan struct{})
 	var err error
 	var client *monitoring.MetricClient
-	if client, err = b.createClient(cfg); err != nil {
+	if client, err = b.createClient(cfg, env.Logger()); err != nil {
 		return nil, err
 	}
 	buffered := &buffered{
-		pushMetrics: client.CreateTimeSeries,
-		closeMe:     client,
-		project:     cfg.ProjectId,
-		m:           sync.Mutex{},
-		l:           env.Logger(),
+		pushMetrics:         client.CreateTimeSeries,
+		closeMe:             client,
+		project:             cfg.ProjectId,
+		m:                   sync.Mutex{},
+		l:                   env.Logger(),
+		timeSeriesBatchSize: timeSeriesBatchLimit,
+		buffer:              []*monitoringpb.TimeSeries{},
+		mergeTrigger:        mergeBufferTrigger,
+		mergedTS:            make(map[uint64]*monitoringpb.TimeSeries),
+		retryBuffer:         []*monitoringpb.TimeSeries{},
+		retryCounter:        map[uint64]int{},
+		retryLimit:          maxRetryAttempt,
+		pushInterval:        cfg.PushInterval,
+		env:                 env,
 	}
-	// We hold on to the ref to the ticker so we can stop it later
-	buffered.start(env, ticker)
+	// We hold on to the ref to the ticker so we can stop it later and quit channel to exit the daemon.
+	buffered.start(env, ticker, quit)
 	h := &handler{
 		l:          env.Logger(),
 		now:        time.Now,
-		projectID:  cfg.ProjectId,
 		client:     buffered,
+		md:         md,
 		metricInfo: types,
 		ticker:     ticker,
+		quit:       quit,
 	}
 	return h, nil
 }
 
 func (h *handler) HandleMetric(_ context.Context, vals []*metric.Instance) error {
-	h.l.Infof("stackdriver.Record called with %d vals", len(vals))
-
 	// TODO: len(vals) is constant for config lifetime, consider pooling
 	data := make([]*monitoringpb.TimeSeries, 0, len(vals))
 	for _, val := range vals {
 		minfo, found := h.metricInfo[val.Name]
 		if !found {
 			// We weren't configured with stackdriver data about this metric, so we don't know how to publish it.
-			if h.l.VerbosityLevel(4) {
-				h.l.Warningf("Skipping metric %s due to not being configured with stackdriver info about it.", val.Name)
-			}
+			h.l.Debugf("Skipping metric %s due to not being configured with stackdriver info about it.", val.Name)
 			continue
 		}
 
@@ -193,6 +222,7 @@ func (h *handler) HandleMetric(_ context.Context, vals []*metric.Instance) error
 		//end, _ := ptypes.TimestampProto(val.EndTime)
 		start, _ := ptypes.TimestampProto(h.now())
 		end, _ := ptypes.TimestampProto(h.now())
+		end.Nanos += usec
 
 		ts := &monitoringpb.TimeSeries{
 			Metric: &metricpb.Metric{
@@ -215,15 +245,17 @@ func (h *handler) HandleMetric(_ context.Context, vals []*metric.Instance) error
 		// The logging SDK has logic built in that does this for us: if a resource is not provided it fills in the global
 		// resource as a default. Since we don't have equivalent behavior for monitoring, we do it ourselves.
 		if val.MonitoredResourceType != "" {
+			labels := helper.ToStringMap(val.MonitoredResourceDimensions)
+			h.md.FillProjectMetadata(labels)
 			ts.Resource = &monitoredres.MonitoredResource{
 				Type:   val.MonitoredResourceType,
-				Labels: helper.ToStringMap(val.MonitoredResourceDimensions),
+				Labels: labels,
 			}
 		} else {
 			ts.Resource = &monitoredres.MonitoredResource{
 				Type: "global",
 				Labels: map[string]string{
-					"project_id": h.projectID,
+					"project_id": h.md.ProjectID,
 				},
 			}
 		}
@@ -236,6 +268,7 @@ func (h *handler) HandleMetric(_ context.Context, vals []*metric.Instance) error
 
 func (h *handler) Close() error {
 	h.ticker.Stop()
+	close(h.quit)
 	return h.client.Close()
 }
 
@@ -243,27 +276,28 @@ func toTypedVal(val interface{}, i info) *monitoringpb.TypedValue {
 	if i.minfo.Value == metricpb.MetricDescriptor_DISTRIBUTION {
 		v, err := toDist(val, i)
 		if err != nil {
-			return &monitoringpb.TypedValue{&monitoringpb.TypedValue_DistributionValue{}}
+			return &monitoringpb.TypedValue{Value: &monitoringpb.TypedValue_DistributionValue{}}
 		}
 		return v
 	}
 
 	switch labelMap[i.vtype] {
 	case labelpb.LabelDescriptor_BOOL:
-		return &monitoringpb.TypedValue{&monitoringpb.TypedValue_BoolValue{BoolValue: val.(bool)}}
+		return &monitoringpb.TypedValue{Value: &monitoringpb.TypedValue_BoolValue{BoolValue: val.(bool)}}
 	case labelpb.LabelDescriptor_INT64:
-		if t, ok := val.(time.Time); ok {
-			val = t.Nanosecond() / int(time.Microsecond)
-		} else if d, ok := val.(time.Duration); ok {
-			val = d.Nanoseconds() / int64(time.Microsecond)
+		switch v := val.(type) {
+		case time.Time:
+			val = v.Nanosecond() / int(time.Microsecond)
+		case time.Duration:
+			val = v.Nanoseconds() / int64(time.Microsecond)
 		}
-		return &monitoringpb.TypedValue{&monitoringpb.TypedValue_Int64Value{Int64Value: val.(int64)}}
+		return &monitoringpb.TypedValue{Value: &monitoringpb.TypedValue_Int64Value{Int64Value: val.(int64)}}
 	default:
-		return &monitoringpb.TypedValue{&monitoringpb.TypedValue_StringValue{StringValue: fmt.Sprintf("%v", val)}}
+		return &monitoringpb.TypedValue{Value: &monitoringpb.TypedValue_StringValue{StringValue: fmt.Sprintf("%v", val)}}
 	}
 }
 
-func metricType(name string) string {
+func customMetricType(name string) string {
 	// TODO: figure out what, if anything, we need to do to sanitize these.
 	return customMetricPrefix + name
 }

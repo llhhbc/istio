@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors. All Rights Reserved.
+// Copyright 2017 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package mixerInternalFail
+package client_test
 
 import (
 	"fmt"
 	"testing"
 
-	rpc "istio.io/gogo-genproto/googleapis/google/rpc"
+	"github.com/gogo/googleapis/google/rpc"
+
 	"istio.io/istio/mixer/test/client/env"
 )
 
@@ -48,11 +49,12 @@ func TestMixerInternalFail(t *testing.T) {
 	}
 
 	// Set to fail_close
-	env.SetNetworPolicy(s.V2().HTTPServerConf, false)
+	env.SetNetworPolicy(s.MfConfig().HTTPServerConf, false)
 	s.ReStartEnvoy()
 
 	tag = "Fail-Close"
 	// Use fail close policy.
+	url = fmt.Sprintf("http://localhost:%d/echo", s.Ports().ServerProxyPort)
 	code, _, err = env.HTTPGet(url)
 	if err != nil {
 		t.Errorf("Failed in request %s: %v", tag, err)

@@ -55,9 +55,10 @@ import (
 	jaeger "github.com/uber/jaeger-client-go"
 	"github.com/uber/jaeger-client-go/transport"
 	"github.com/uber/jaeger-client-go/transport/zipkin"
+	zk "github.com/uber/jaeger-client-go/zipkin"
 	"go.uber.org/zap"
 
-	"istio.io/istio/pkg/log"
+	"istio.io/pkg/log"
 )
 
 /* TODO:
@@ -72,7 +73,6 @@ type holder struct {
 
 var (
 	httpTimeout = 5 * time.Second
-	sampler     = jaeger.NewConstSampler(true)
 	poolSpans   = jaeger.TracerOptions.PoolSpans(false)
 	logger      = spanLogger{}
 )
@@ -94,6 +94,11 @@ func configure(serviceName string, options *Options, nz newZipkin) (io.Closer, e
 	}
 
 	reporters := make([]jaeger.Reporter, 0, 3)
+
+	sampler, err := jaeger.NewProbabilisticSampler(options.SamplingRate)
+	if err != nil {
+		return nil, fmt.Errorf("could not build trace sampler: %v", err)
+	}
 
 	if options.ZipkinURL != "" {
 		trans, err := nz(options.ZipkinURL, zipkin.HTTPLogger(logger), zipkin.HTTPTimeout(httpTimeout))
@@ -121,7 +126,17 @@ func configure(serviceName string, options *Options, nz newZipkin) (io.Closer, e
 		rep = jaeger.NewCompositeReporter(reporters...)
 	}
 
-	tracer, closer := jaeger.NewTracer(serviceName, sampler, rep, poolSpans)
+	var tracer ot.Tracer
+	var closer io.Closer
+
+	if options.ZipkinURL != "" {
+		zipkinPropagator := zk.NewZipkinB3HTTPHeaderPropagator()
+		injector := jaeger.TracerOptions.Injector(ot.HTTPHeaders, zipkinPropagator)
+		extractor := jaeger.TracerOptions.Extractor(ot.HTTPHeaders, zipkinPropagator)
+		tracer, closer = jaeger.NewTracer(serviceName, sampler, rep, poolSpans, injector, extractor, jaeger.TracerOptions.Gen128Bit(true))
+	} else {
+		tracer, closer = jaeger.NewTracer(serviceName, sampler, rep, poolSpans, jaeger.TracerOptions.Gen128Bit(true))
+	}
 
 	// NOTE: global side effect!
 	ot.SetGlobalTracer(tracer)

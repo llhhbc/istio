@@ -24,6 +24,33 @@ import (
 )
 
 // The `logentry` template represents an individual entry within a log.
+//
+// Example config:
+//
+// ```yaml
+// apiVersion: "config.istio.io/v1alpha2"
+// kind: instance
+// metadata:
+//   name: accesslog
+//   namespace: istio-system
+// spec:
+//   compiledTemplate: logentry
+//   params:
+//     severity: '"Default"'
+//     timestamp: request.time
+//     variables:
+//       sourceIp: source.ip | ip("0.0.0.0")
+//       destinationIp: destination.ip | ip("0.0.0.0")
+//       sourceUser: source.principal | ""
+//       method: request.method | ""
+//       url: request.path | ""
+//       protocol: request.scheme | "http"
+//       responseCode: response.code | 0
+//       responseSize: response.size | 0
+//       requestSize: request.size | 0
+//       latency: response.duration | "0ms"
+//     monitored_resource_type: '"UNSPECIFIED"'
+// ```
 
 // Fully qualified name of the template
 const TemplateName = "logentry"
@@ -33,32 +60,8 @@ const TemplateName = "logentry"
 // The `logentry` template represents an individual entry within a log.
 //
 // When writing the configuration, the value for the fields associated with this template can either be a
-// literal or an [expression](https://istio.io/docs/reference/config/mixer/expression-language.html). Please note that if the datatype of a field is not istio.mixer.adapter.model.v1beta1.Value,
-// then the expression's [inferred type](https://istio.io/docs/reference/config/mixer/expression-language.html#type-checking) must match the datatype of the field.
-//
-// Example config:
-// ```yaml
-// apiVersion: "config.istio.io/v1alpha2"
-// kind: logentry
-// metadata:
-//   name: accesslog
-//   namespace: istio-system
-// spec:
-//   severity: '"Default"'
-//   timestamp: request.time
-//   variables:
-//     sourceIp: source.ip | ip("0.0.0.0")
-//     destinationIp: destination.ip | ip("0.0.0.0")
-//     sourceUser: source.user | ""
-//     method: request.method | ""
-//     url: request.path | ""
-//     protocol: request.scheme | "http"
-//     responseCode: response.code | 0
-//     responseSize: response.size | 0
-//     requestSize: request.size | 0
-//     latency: response.duration | "0ms"
-//   monitored_resource_type: '"UNSPECIFIED"'
-// ```
+// literal or an [expression](https://istio.io/docs/reference//config/policy-and-telemetry/expression-language/). Please note that if the datatype of a field is not istio.policy.v1beta1.Value,
+// then the expression's [inferred type](https://istio.io/docs/reference//config/policy-and-telemetry/expression-language/#type-checking) must match the datatype of the field.
 type Instance struct {
 	// Name of the instance as specified in configuration.
 	Name string

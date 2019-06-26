@@ -21,20 +21,20 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 
-	"istio.io/istio/pkg/collateral"
-	"istio.io/istio/pkg/log"
-	"istio.io/istio/pkg/version"
-	"istio.io/istio/security/cmd/node_agent/na"
 	"istio.io/istio/security/pkg/cmd"
+	nvm "istio.io/istio/security/pkg/nodeagent/vm"
+	"istio.io/pkg/collateral"
+	"istio.io/pkg/log"
+	"istio.io/pkg/version"
 )
 
 var (
-	naConfig = na.NewConfig()
+	naConfig = nvm.NewConfig()
 
 	rootCmd = &cobra.Command{
 		Use:   "node_agent",
-		Short: "Istio security per-node agent",
-
+		Short: "Istio security per-node agent.",
+		Args:  cobra.ExactArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
 			runNodeAgent()
 		},
@@ -51,29 +51,43 @@ func init() {
 
 	flags := rootCmd.Flags()
 
-	flags.StringVar(&naConfig.ServiceIdentityOrg, "org", "", "Organization for the cert")
-	flags.DurationVar(&naConfig.WorkloadCertTTL, "workload-cert-ttl", 19*time.Hour,
+	cAClientConfig := &naConfig.CAClientConfig
+	flags.StringVar(&cAClientConfig.Org, "org", "", "Organization for the cert")
+	flags.DurationVar(&cAClientConfig.RequestedCertTTL, "workload-cert-ttl", 90*24*time.Hour,
 		"The requested TTL for the workload")
-	flags.IntVar(&naConfig.RSAKeySize, "key-size", 2048, "Size of generated private key")
-	flags.StringVar(&naConfig.IstioCAAddress,
-		"ca-address", "istio-ca:8060", "Istio CA address")
-	flags.StringVar(&naConfig.Env, "env", "unspecified",
-		"Node Environment : unspecified | onprem | gcp | aws")
+	flags.IntVar(&cAClientConfig.RSAKeySize, "key-size", 2048, "Size of generated private key")
+	flags.StringVar(&cAClientConfig.CAAddress,
+		"ca-address", "istio-citadel:8060", "Istio CA address")
 
-	flags.StringVar(&naConfig.CertChainFile, "cert-chain",
+	flags.StringVar(&cAClientConfig.Env, "env", "unspecified",
+		"Node Environment : unspecified | onprem | gcp | aws")
+	flags.StringVar(&cAClientConfig.Platform, "platform", "vm", "The platform istio runs on: vm | k8s")
+
+	flags.StringVar(&cAClientConfig.CertChainFile, "cert-chain",
 		"/etc/certs/cert-chain.pem", "Node Agent identity cert file")
-	flags.StringVar(&naConfig.KeyFile,
+	flags.StringVar(&cAClientConfig.KeyFile,
 		"key", "/etc/certs/key.pem", "Node Agent private key file")
-	flags.StringVar(&naConfig.RootCertFile, "root-cert",
+	flags.StringVar(&cAClientConfig.RootCertFile, "root-cert",
 		"/etc/certs/root-cert.pem", "Root Certificate file")
+
+	flags.BoolVar(&naConfig.DualUse, "experimental-dual-use",
+		false, "Enable dual-use mode. Generates certificates with a CommonName identical to the SAN.")
 
 	naConfig.LoggingOptions.AttachCobraFlags(rootCmd)
 	cmd.InitializeFlags(rootCmd)
 }
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
-		log.Errora(err)
+	if naConfig.CAClientConfig.Platform == "vm" {
+		if err := rootCmd.Execute(); err != nil {
+			log.Errora(err)
+			os.Exit(-1)
+		}
+	} else if naConfig.CAClientConfig.Platform == "k8s" {
+		log.Errorf("WIP for support on k8s...")
+		os.Exit(-1)
+	} else {
+		log.Errorf("node agent on %v is not supported yet", naConfig.CAClientConfig.Platform)
 		os.Exit(-1)
 	}
 }
@@ -83,7 +97,7 @@ func runNodeAgent() {
 		log.Errora(err)
 		os.Exit(-1)
 	}
-	nodeAgent, err := na.NewNodeAgent(naConfig)
+	nodeAgent, err := nvm.NewNodeAgent(naConfig)
 	if err != nil {
 		log.Errora(err)
 		os.Exit(-1)

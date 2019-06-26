@@ -16,6 +16,7 @@ package inject
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -23,19 +24,108 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"k8s.io/helm/pkg/strvals"
+
+	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/ghodss/yaml"
-	"github.com/golang/protobuf/jsonpb"
+	"github.com/gogo/protobuf/jsonpb"
+	"github.com/onsi/gomega"
 	"k8s.io/api/admission/v1beta1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/helm/pkg/chartutil"
+	"k8s.io/helm/pkg/engine"
+	"k8s.io/helm/pkg/proto/hapi/chart"
+	tversion "k8s.io/helm/pkg/proto/hapi/version"
+	"k8s.io/helm/pkg/timeconv"
 
-	"istio.io/istio/pilot/pkg/kube/admit/testcerts"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/test/util"
+	"istio.io/istio/pkg/mcp/testing/testcerts"
 )
+
+const (
+	helmChartDirectory     = "../../../../install/kubernetes/helm/istio"
+	helmConfigMapKey       = "istio/templates/sidecar-injector-configmap.yaml"
+	injectorConfig         = "../../../../install/kubernetes/helm/istio/files/injection-template.yaml"
+	helmValuesFile         = "values.yaml"
+	yamlSeparator          = "\n---"
+	minimalSidecarTemplate = `
+initContainers:
+- name: istio-init
+containers:
+- name: istio-proxy
+volumes:
+- name: istio-envoy
+imagePullSecrets:
+- name: istio-image-pull-secrets
+`
+)
+
+var (
+	rotatedKey = []byte(`-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEA3Tr24CaBegyfkdDGWckqMHEWvpJBThjXlMz/FKcg1bgq57OD
+oNHXN4dcyPCHWWEY3Eo3YG1es4pqTkvzK0+1JoY6/K88Lu1ePj5PeSFuWfPWi1BW
+9oyWJW+AAzqqGkZmSo4z26N+E7N8ht5bTBMNVD3jqz9+MaqCTVmQ6dAgdFKH07wd
+XWh6kKoh2g9bgBKB+qWrezmVRb31i93sM1pJos35cUmIbWgiSQYuSXEInitejcGZ
+cBjqRy61SiZB7nbmMoew0G0aGXe20Wx+QiyJjbt9XNUm0IvjAJ1SSiPqfFQ4F+tx
+K4q3xAwp1smyiMv57RNC2ny8YMntZYgQDDkhBQIDAQABAoIBAQDZHK396yw0WEEd
+vFN8+CRUaBfXLPe0KkMgAFLxtNdPhy9sNsueP3HESC7x8MQUHmtkfd1837kJ4HRV
+pMnfnpj8Vs17AIrCzycnVMVv7jQ7SUcrb8v4qJ4N3TA3exJHOQHYd1hDXF81/Hbg
+cUYOEcCKBTby8BvrqBe6y4ShQiUnoaeeM5j9x32+QB652/9PMuZJ9xfwyoEBjoVA
+cccp+u3oBX864ztaG9Gn0wbgRVeafsPfuAOUmShykohV1mVJddiA0wayxGi0TmoK
+dwrltdToI7BmpmmTLc59O44JFGwO67aJQHsrHBjEnpWlxFDwbfZuf93FgdFUFFjr
+tVx2dPF9AoGBAPkIaUYxMSW78MD9862eJlGS6F/SBfPLTve3l9M+UFnEsWapNz+V
+anlupaBtlfRJxLDzjheMVZTv/TaFIrrMdN/xc/NoYj6lw5RV8PEfKPB0FjSAqSEl
+iVOA5q4kuI1xEeV7xLE4uJUF3wdoHz9cSmjrXDVZXq/KsaInABlAl1xjAoGBAONr
+bgFUlQ+fbsGNjeefrIXBSU93cDo5tkd4+lefrmUVTwCo5V/AvMMQi88gV/sz6qCJ
+gR0hXOqdQyn++cuqfMTDj4lediDGFEPho+n4ToIvkA020NQ05cKxcmn/6Ei+P9pk
+v+zoT9RiVnkBje2n/KU2d/PEL9Nl4gvvAgPLt8V3AoGAZ6JZdQ15n3Nj0FyecKz0
+01Oogl+7fGYqGap8cztmYsUY8lkPFdXPNnOWV3njQoMEaIMiqagL4Wwx2uNyvXvi
+U2N+1lelMt720h8loqJN/irBJt44BARD7s0gsm2zo6DfSrnD8+Bf6BxGYSWyg0Kb
+8KepesYTQmK+o3VJdDjOBHMCgYAIxbwYkQqu75d2H9+5b49YGXyadCEAHfnKCACg
+IKi5fXjurZUrfGPLonfCJZ0/M2F5j9RLK15KLobIt+0qzgjCDkkbI2mrGfjuJWYN
+QGbG3s7Ps62age/a8r1XGWf8ZlpQMlK08MEjkCeFw2mWIUS9mrxFyuuNXAC8NRv+
+yXztQQKBgQDWTFFQdeYfuiKHrNmgOmLVuk1WhAaDgsdK8RrnNZgJX9bd7n7bm7No
+GheN946AYsFge4DX7o0UXXJ3h5hTFn/hSWASI54cO6WyWNEiaP5HRlZqK7Jfej7L
+mz+dlU3j/BY19RLmYeg4jFV4W66CnkDqpneOJs5WdmFFoWnHn7gRBw==
+-----END RSA PRIVATE KEY-----`)
+
+	// ServerCert is a test cert for dynamic admission controller.
+	rotatedCert = []byte(`-----BEGIN CERTIFICATE-----
+MIIDATCCAemgAwIBAgIJAJwGb32Zn8sDMA0GCSqGSIb3DQEBCwUAMA4xDDAKBgNV
+BAMMA19jYTAgFw0xODAzMTYxNzI0NDJaGA8yMjkxMTIzMDE3MjQ0MlowEjEQMA4G
+A1UEAwwHX3NlcnZlcjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAN06
+9uAmgXoMn5HQxlnJKjBxFr6SQU4Y15TM/xSnINW4Kuezg6DR1zeHXMjwh1lhGNxK
+N2BtXrOKak5L8ytPtSaGOvyvPC7tXj4+T3khblnz1otQVvaMliVvgAM6qhpGZkqO
+M9ujfhOzfIbeW0wTDVQ946s/fjGqgk1ZkOnQIHRSh9O8HV1oepCqIdoPW4ASgfql
+q3s5lUW99Yvd7DNaSaLN+XFJiG1oIkkGLklxCJ4rXo3BmXAY6kcutUomQe525jKH
+sNBtGhl3ttFsfkIsiY27fVzVJtCL4wCdUkoj6nxUOBfrcSuKt8QMKdbJsojL+e0T
+Qtp8vGDJ7WWIEAw5IQUCAwEAAaNcMFowCQYDVR0TBAIwADALBgNVHQ8EBAMCBeAw
+HQYDVR0lBBYwFAYIKwYBBQUHAwIGCCsGAQUFBwMBMCEGA1UdEQQaMBiHBH8AAAGH
+EAAAAAAAAAAAAAAAAAAAAAEwDQYJKoZIhvcNAQELBQADggEBACbBlWo/pY/OIJaW
+RwkfSRVzEIWpHt5OF6p93xfyy4/zVwwhH1AQB7Euji8vOaVNOpMfGYLNH3KIRReC
+CIvGEH4yZDbpiH2cOshqMCuV1CMRUTdl4mq6M0PtGm6b8OG3uIFTLIR973LBWOl5
+wCR1yrefT1NHuIScGaBXUGAV4JAx37pfg84hDD73T2j1TDD3Lrmsb9WCP+L26TG6
+ICN61cIhgz8wChQpF8/fFAI5Fjbjrz5C1Xw/EUHLf/TTn/7Yfp2BHsGm126Et+k+
++MLBzBfrHKwPaGqDvNHUDrI6c3GI0Qp7jW93FbL5ul8JQ+AowoMF2dIEbN9qQEVP
+ZOQ5UvU=
+-----END CERTIFICATE-----`)
+)
+
+func parseToLabelSelector(t *testing.T, selector string) *metav1.LabelSelector {
+	result, err := metav1.ParseToLabelSelector(selector)
+	if err != nil {
+		t.Errorf("Invalid selector %v: %v", selector, err)
+	}
+
+	return result
+}
 
 func TestInjectRequired(t *testing.T) {
 	podSpec := &corev1.PodSpec{}
@@ -43,13 +133,15 @@ func TestInjectRequired(t *testing.T) {
 		HostNetwork: true,
 	}
 	cases := []struct {
-		policy  InjectionPolicy
+		config  *Config
 		podSpec *corev1.PodSpec
 		meta    *metav1.ObjectMeta
 		want    bool
 	}{
 		{
-			policy:  InjectionPolicyEnabled,
+			config: &Config{
+				Policy: InjectionPolicyEnabled,
+			},
 			podSpec: podSpec,
 			meta: &metav1.ObjectMeta{
 				Name:        "no-policy",
@@ -59,7 +151,9 @@ func TestInjectRequired(t *testing.T) {
 			want: true,
 		},
 		{
-			policy:  InjectionPolicyEnabled,
+			config: &Config{
+				Policy: InjectionPolicyEnabled,
+			},
 			podSpec: podSpec,
 			meta: &metav1.ObjectMeta{
 				Name:      "default-policy",
@@ -68,27 +162,33 @@ func TestInjectRequired(t *testing.T) {
 			want: true,
 		},
 		{
-			policy:  InjectionPolicyEnabled,
+			config: &Config{
+				Policy: InjectionPolicyEnabled,
+			},
 			podSpec: podSpec,
 			meta: &metav1.ObjectMeta{
 				Name:        "force-on-policy",
 				Namespace:   "test-namespace",
-				Annotations: map[string]string{istioSidecarAnnotationPolicyKey: "true"},
+				Annotations: map[string]string{annotationPolicy: "true"},
 			},
 			want: true,
 		},
 		{
-			policy:  InjectionPolicyEnabled,
+			config: &Config{
+				Policy: InjectionPolicyEnabled,
+			},
 			podSpec: podSpec,
 			meta: &metav1.ObjectMeta{
 				Name:        "force-off-policy",
 				Namespace:   "test-namespace",
-				Annotations: map[string]string{istioSidecarAnnotationPolicyKey: "false"},
+				Annotations: map[string]string{annotationPolicy: "false"},
 			},
 			want: false,
 		},
 		{
-			policy:  InjectionPolicyDisabled,
+			config: &Config{
+				Policy: InjectionPolicyDisabled,
+			},
 			podSpec: podSpec,
 			meta: &metav1.ObjectMeta{
 				Name:        "no-policy",
@@ -98,7 +198,9 @@ func TestInjectRequired(t *testing.T) {
 			want: false,
 		},
 		{
-			policy:  InjectionPolicyDisabled,
+			config: &Config{
+				Policy: InjectionPolicyDisabled,
+			},
 			podSpec: podSpec,
 			meta: &metav1.ObjectMeta{
 				Name:      "default-policy",
@@ -107,27 +209,33 @@ func TestInjectRequired(t *testing.T) {
 			want: false,
 		},
 		{
-			policy:  InjectionPolicyDisabled,
+			config: &Config{
+				Policy: InjectionPolicyDisabled,
+			},
 			podSpec: podSpec,
 			meta: &metav1.ObjectMeta{
 				Name:        "force-on-policy",
 				Namespace:   "test-namespace",
-				Annotations: map[string]string{istioSidecarAnnotationPolicyKey: "true"},
+				Annotations: map[string]string{annotationPolicy: "true"},
 			},
 			want: true,
 		},
 		{
-			policy:  InjectionPolicyDisabled,
+			config: &Config{
+				Policy: InjectionPolicyDisabled,
+			},
 			podSpec: podSpec,
 			meta: &metav1.ObjectMeta{
 				Name:        "force-off-policy",
 				Namespace:   "test-namespace",
-				Annotations: map[string]string{istioSidecarAnnotationPolicyKey: "false"},
+				Annotations: map[string]string{annotationPolicy: "false"},
 			},
 			want: false,
 		},
 		{
-			policy:  InjectionPolicyEnabled,
+			config: &Config{
+				Policy: InjectionPolicyEnabled,
+			},
 			podSpec: podSpecHostNetwork,
 			meta: &metav1.ObjectMeta{
 				Name:        "force-off-policy",
@@ -136,70 +244,350 @@ func TestInjectRequired(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			config: &Config{
+				Policy: "wrong_policy",
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:        "wrong-policy",
+				Namespace:   "test-namespace",
+				Annotations: map[string]string{},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyEnabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{{MatchLabels: map[string]string{"foo": "bar"}}},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-enabled-always-inject-no-labels",
+				Namespace: "test-namespace",
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyEnabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{{MatchLabels: map[string]string{"foo": "bar"}}},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-enabled-always-inject-with-labels",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"foo": "bar1"},
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyDisabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{{MatchLabels: map[string]string{"foo": "bar"}}},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-disabled-always-inject-no-labels",
+				Namespace: "test-namespace",
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyDisabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{{MatchLabels: map[string]string{"foo": "bar"}}},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-disabled-always-inject-with-labels",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"foo": "bar"},
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy:              InjectionPolicyEnabled,
+				NeverInjectSelector: []metav1.LabelSelector{{MatchLabels: map[string]string{"foo": "bar"}}},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-enabled-never-inject-no-labels",
+				Namespace: "test-namespace",
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy:              InjectionPolicyEnabled,
+				NeverInjectSelector: []metav1.LabelSelector{{MatchLabels: map[string]string{"foo": "bar"}}},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-enabled-never-inject-with-labels",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"foo": "bar"},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:              InjectionPolicyDisabled,
+				NeverInjectSelector: []metav1.LabelSelector{{MatchLabels: map[string]string{"foo": "bar"}}},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-disabled-never-inject-no-labels",
+				Namespace: "test-namespace",
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:              InjectionPolicyDisabled,
+				NeverInjectSelector: []metav1.LabelSelector{{MatchLabels: map[string]string{"foo": "bar"}}},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-disabled-never-inject-with-labels",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"foo": "bar"},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:              InjectionPolicyEnabled,
+				NeverInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "foo")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-enabled-never-inject-with-empty-label",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"foo": "", "foo2": "bar2"},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyDisabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "foo")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-disabled-always-inject-with-empty-label",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"foo": "", "foo2": "bar2"},
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyDisabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "always")},
+				NeverInjectSelector:  []metav1.LabelSelector{*parseToLabelSelector(t, "never")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-disabled-always-never-inject-with-label-returns-true",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"always": "bar", "foo2": "bar2"},
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyDisabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "always")},
+				NeverInjectSelector:  []metav1.LabelSelector{*parseToLabelSelector(t, "never")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-disabled-always-never-inject-with-label-returns-false",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"never": "bar", "foo2": "bar2"},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyDisabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "always")},
+				NeverInjectSelector:  []metav1.LabelSelector{*parseToLabelSelector(t, "never")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-disabled-always-never-inject-with-both-labels",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"always": "bar", "never": "bar2"},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:              InjectionPolicyEnabled,
+				NeverInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "foo")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:        "policy-enabled-annotation-true-never-inject",
+				Namespace:   "test-namespace",
+				Annotations: map[string]string{annotationPolicy: "true"},
+				Labels:      map[string]string{"foo": "", "foo2": "bar2"},
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyEnabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "foo")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:        "policy-enabled-annotation-false-always-inject",
+				Namespace:   "test-namespace",
+				Annotations: map[string]string{annotationPolicy: "false"},
+				Labels:      map[string]string{"foo": "", "foo2": "bar2"},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyDisabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "foo")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:        "policy-disabled-annotation-false-always-inject",
+				Namespace:   "test-namespace",
+				Annotations: map[string]string{annotationPolicy: "false"},
+				Labels:      map[string]string{"foo": "", "foo2": "bar2"},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:              InjectionPolicyEnabled,
+				NeverInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "foo"), *parseToLabelSelector(t, "bar")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-enabled-never-inject-multiple-labels",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"label1": "", "bar": "anything"},
+			},
+			want: false,
+		},
+		{
+			config: &Config{
+				Policy:               InjectionPolicyDisabled,
+				AlwaysInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "foo"), *parseToLabelSelector(t, "bar")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:      "policy-enabled-always-inject-multiple-labels",
+				Namespace: "test-namespace",
+				Labels:    map[string]string{"label1": "", "bar": "anything"},
+			},
+			want: true,
+		},
+		{
+			config: &Config{
+				Policy:              InjectionPolicyDisabled,
+				NeverInjectSelector: []metav1.LabelSelector{*parseToLabelSelector(t, "foo")},
+			},
+			podSpec: podSpec,
+			meta: &metav1.ObjectMeta{
+				Name:        "policy-disabled-annotation-true-never-inject",
+				Namespace:   "test-namespace",
+				Annotations: map[string]string{annotationPolicy: "true"},
+				Labels:      map[string]string{"foo": "", "foo2": "bar2"},
+			},
+			want: true,
+		},
 	}
 
 	for _, c := range cases {
-		if got := injectRequired(ignoredNamespaces, c.policy, c.podSpec, c.meta); got != c.want {
-			t.Errorf("injectRequired(%v, %v) got %v want %v", c.policy, c.meta, got, c.want)
+		if got := injectRequired(ignoredNamespaces, c.config, c.podSpec, c.meta); got != c.want {
+			t.Errorf("injectRequired(%v, %v) got %v want %v", c.config, c.meta, got, c.want)
 		}
 	}
 }
 
-func createTestWebhook() (*Webhook, error) {
-	mesh := model.DefaultMeshConfig()
-
-	raw, err := ioutil.ReadFile("testdata/TestWebhookInject_template.yaml")
-	if err != nil {
-		return nil, err
-	}
-	sidecarTemplate := string(raw)
-
-	return &Webhook{
-		sidecarConfig: &Config{
-			Policy:   InjectionPolicyEnabled,
-			Template: sidecarTemplate,
-		},
-		sidecarTemplateVersion: "unit-test-fake-version",
-		meshConfig:             &mesh,
-	}, nil
-}
-
-func TestInject(t *testing.T) {
+func TestWebhookInject(t *testing.T) {
 	cases := []struct {
-		inputFile string
-		wantFile  string
+		inputFile    string
+		wantFile     string
+		templateFile string
 	}{
 		{
 			inputFile: "TestWebhookInject.yaml",
 			wantFile:  "TestWebhookInject.patch",
 		},
 		{
-			inputFile: "TestWebhookInject_no_volumes.yaml",
-			wantFile:  "TestWebhookInject_no_volumes.patch",
-		},
-		{
-			inputFile: "TestWebhookInject_no_containers_volumes.yaml",
-			wantFile:  "TestWebhookInject_no_containers_volumes.patch",
+			inputFile: "TestWebhookInject_no_initContainers.yaml",
+			wantFile:  "TestWebhookInject_no_initContainers.patch",
 		},
 		{
 			inputFile: "TestWebhookInject_no_containers.yaml",
 			wantFile:  "TestWebhookInject_no_containers.patch",
 		},
 		{
-			inputFile: "TestWebhookInject_no_initContainers.yaml",
-			wantFile:  "TestWebhookInject_no_initContainers.patch",
+			inputFile: "TestWebhookInject_no_volumes.yaml",
+			wantFile:  "TestWebhookInject_no_volumes.patch",
 		},
 		{
-			inputFile: "TestWebhookInject_no_initContainers_volumes.yaml",
-			wantFile:  "TestWebhookInject_no_initContainers_volumes.patch",
+			inputFile: "TestWebhookInject_no_imagePullSecrets.yaml",
+			wantFile:  "TestWebhookInject_no_imagePullSecrets.patch",
+		},
+		{
+			inputFile: "TestWebhookInject_no_volumes_imagePullSecrets.yaml",
+			wantFile:  "TestWebhookInject_no_volumes_imagePullSecrets.patch",
+		},
+		{
+			inputFile: "TestWebhookInject_no_containers_volumes_imagePullSecrets.yaml",
+			wantFile:  "TestWebhookInject_no_containers_volumes_imagePullSecrets.patch",
+		},
+		{
+			inputFile: "TestWebhookInject_no_containers_volumes.yaml",
+			wantFile:  "TestWebhookInject_no_containers_volumes.patch",
+		},
+		{
+			inputFile: "TestWebhookInject_no_containers_imagePullSecrets.yaml",
+			wantFile:  "TestWebhookInject_no_containers_imagePullSecrets.patch",
 		},
 		{
 			inputFile: "TestWebhookInject_no_initContainers_containers.yaml",
 			wantFile:  "TestWebhookInject_no_initContainers_containers.patch",
 		},
 		{
+			inputFile: "TestWebhookInject_no_initContainers_volumes.yaml",
+			wantFile:  "TestWebhookInject_no_initContainers_volumes.patch",
+		},
+		{
+			inputFile: "TestWebhookInject_no_initContainers_imagePullSecrets.yaml",
+			wantFile:  "TestWebhookInject_no_initContainers_imagePullSecrets.patch",
+		},
+		{
+			inputFile: "TestWebhookInject_no_containers_volumes_imagePullSecrets.yaml",
+			wantFile:  "TestWebhookInject_no_containers_volumes_imagePullSecrets.patch",
+		},
+		{
+			inputFile: "TestWebhookInject_no_initContainers_volumes_imagePullSecrets.yaml",
+			wantFile:  "TestWebhookInject_no_initContainers_volumes_imagePullSecrets.patch",
+		},
+		{
 			inputFile: "TestWebhookInject_no_initContainers_containers_volumes.yaml",
-			wantFile:  "TestWebhookInject_no_initcontainers_containers_volumes.patch",
+			wantFile:  "TestWebhookInject_no_initContainers_containers_volumes.patch",
+		},
+		{
+			inputFile: "TestWebhookInject_no_initContainers_containers_imagePullSecrets.yaml",
+			wantFile:  "TestWebhookInject_no_initContainers_containers_imagePullSecrets.patch",
+		},
+		{
+			inputFile: "TestWebhookInject_no_initContainers_containers_volumes_imagePullSecrets.yaml",
+			wantFile:  "TestWebhookInject_no_initcontainers_containers_volumes_imagePullSecrets.patch",
 		},
 		{
 			inputFile: "TestWebhookInject_replace.yaml",
@@ -209,20 +597,44 @@ func TestInject(t *testing.T) {
 			inputFile: "TestWebhookInject_replace_backwards_compat.yaml",
 			wantFile:  "TestWebhookInject_replace_backwards_compat.patch",
 		},
+		{
+			inputFile:    "TestWebhookInject_http_probe_rewrite.yaml",
+			wantFile:     "TestWebhookInject_http_probe_rewrite.patch",
+			templateFile: "TestWebhookInject_http_probe_rewrite_template.yaml",
+		},
+		{
+			inputFile:    "TestWebhookInject_http_probe_nosidecar_rewrite.yaml",
+			wantFile:     "TestWebhookInject_http_probe_nosidecar_rewrite.patch",
+			templateFile: "TestWebhookInject_http_probe_nosidecar_rewrite_template.yaml",
+		},
+		{
+			inputFile:    "TestWebhookInject_https_probe_rewrite.yaml",
+			wantFile:     "TestWebhookInject_https_probe_rewrite.patch",
+			templateFile: "TestWebhookInject_https_probe_rewrite_template.yaml",
+		},
+		{
+			inputFile:    "TestWebhookInject_http_probe_rewrite_enabled_via_annotation.yaml",
+			wantFile:     "TestWebhookInject_http_probe_rewrite_enabled_via_annotation.patch",
+			templateFile: "TestWebhookInject_http_probe_rewrite_enabled_via_annotation_template.yaml",
+		},
+		{
+			inputFile:    "TestWebhookInject_http_probe_rewrite_disabled_via_annotation.yaml",
+			wantFile:     "TestWebhookInject_http_probe_rewrite_disabled_via_annotation.patch",
+			templateFile: "TestWebhookInject_http_probe_rewrite_disabled_via_annotation_template.yaml",
+		},
 	}
 
 	for i, c := range cases {
-		input := filepath.Join("testdata", c.inputFile)
-		want := filepath.Join("testdata", c.wantFile)
-		t.Run(fmt.Sprintf("[%d] %s", i, input), func(t *testing.T) {
-			wh, err := createTestWebhook()
-			if err != nil {
-				t.Fatalf(err.Error())
-			}
-			podYAML, err := ioutil.ReadFile(input)
-			if err != nil {
-				t.Fatalf(err.Error())
-			}
+		input := filepath.Join("testdata/webhook", c.inputFile)
+		want := filepath.Join("testdata/webhook", c.wantFile)
+		templateFile := "TestWebhookInject_template.yaml"
+		if c.templateFile != "" {
+			templateFile = c.templateFile
+		}
+		t.Run(fmt.Sprintf("[%d] %s", i, c.inputFile), func(t *testing.T) {
+			wh, cleanup := createTestWebhookFromFile(filepath.Join("testdata/webhook", templateFile), t)
+			defer cleanup()
+			podYAML := util.ReadFile(input, t)
 			podJSON, err := yaml.YAMLToJSON(podYAML)
 			if err != nil {
 				t.Fatalf(err.Error())
@@ -243,6 +655,563 @@ func TestInject(t *testing.T) {
 	}
 }
 
+// TestHelmInject tests the webhook injector with the installation configmap.yaml. It runs through many of the
+// same tests as TestIntoResourceFile in order to verify that the webhook performs the same way as the manual injector.
+func TestHelmInject(t *testing.T) {
+	// Create the webhook from the install configmap.
+	webhook, cleanup := createTestWebhookFromHelmConfigMap(t)
+	defer cleanup()
+	// NOTE: this list is a subset of the list in TestIntoResourceFile. It contains all test cases that operate
+	// on Deployments and do not require updates to the injection Params.
+	cases := []struct {
+		inputFile string
+		wantFile  string
+	}{
+		{
+			inputFile: "hello-probes.yaml",
+			wantFile:  "hello-probes.yaml.injected",
+		},
+		{
+			inputFile: "hello.yaml",
+			wantFile:  "hello-config-map-name.yaml.injected",
+		},
+		{
+			inputFile: "frontend.yaml",
+			wantFile:  "frontend.yaml.injected",
+		},
+		{
+			inputFile: "hello-multi.yaml",
+			wantFile:  "hello-multi.yaml.injected",
+		},
+		{
+			inputFile: "statefulset.yaml",
+			wantFile:  "statefulset.yaml.injected",
+		},
+		{
+			inputFile: "daemonset.yaml",
+			wantFile:  "daemonset.yaml.injected",
+		},
+		{
+			inputFile: "job.yaml",
+			wantFile:  "job.yaml.injected",
+		},
+		{
+			inputFile: "replicaset.yaml",
+			wantFile:  "replicaset.yaml.injected",
+		},
+		{
+			inputFile: "replicationcontroller.yaml",
+			wantFile:  "replicationcontroller.yaml.injected",
+		},
+		{
+			inputFile: "list.yaml",
+			wantFile:  "list.yaml.injected",
+		},
+		{
+			inputFile: "list-frontend.yaml",
+			wantFile:  "list-frontend.yaml.injected",
+		},
+		{
+			inputFile: "deploymentconfig.yaml",
+			wantFile:  "deploymentconfig.yaml.injected",
+		},
+		{
+			inputFile: "deploymentconfig-multi.yaml",
+			wantFile:  "deploymentconfig-multi.yaml.injected",
+		},
+		{
+			// Verifies that annotation values are applied properly. This also tests that annotation values
+			// override params when specified.
+			inputFile: "traffic-annotations.yaml",
+			wantFile:  "traffic-annotations.yaml.injected",
+		},
+		{
+			// Verifies that the wildcard character "*" behaves properly when used in annotations.
+			inputFile: "traffic-annotations-wildcards.yaml",
+			wantFile:  "traffic-annotations-wildcards.yaml.injected",
+		},
+		{
+			// Verifies that the wildcard character "*" behaves properly when used in annotations.
+			inputFile: "traffic-annotations-empty-includes.yaml",
+			wantFile:  "traffic-annotations-empty-includes.yaml.injected",
+		},
+		{
+			// Verifies that the status port annotation overrides the default.
+			inputFile: "status_annotations.yaml",
+			wantFile:  "status_annotations.yaml.injected",
+		},
+		{
+			// Verifies that the resource annotation overrides the default.
+			inputFile: "resource_annotations.yaml",
+			wantFile:  "resource_annotations.yaml.injected",
+		},
+		{
+			inputFile: "user-volume.yaml",
+			wantFile:  "user-volume.yaml.injected",
+		},
+	}
+
+	for ci, c := range cases {
+		inputFile := filepath.Join("testdata/webhook", c.inputFile)
+		wantFile := filepath.Join("testdata/webhook", c.wantFile)
+		testName := fmt.Sprintf("[%02d] %s", ci, c.wantFile)
+		t.Run(testName, func(t *testing.T) {
+			// Split multi-part yaml documents. Input and output will have the same number of parts.
+			inputYAMLs := splitYamlFile(inputFile, t)
+			wantYAMLs := splitYamlFile(wantFile, t)
+			goldenYAMLs := make([][]byte, len(inputYAMLs))
+
+			for i := 0; i < len(inputYAMLs); i++ {
+				t.Run(fmt.Sprintf("yamlPart[%d]", i), func(t *testing.T) {
+					// Convert the input YAML to a deployment.
+					inputYAML := inputYAMLs[i]
+					inputJSON := yamlToJSON(inputYAML, t)
+					inputDeployment := jsonToDeployment(inputJSON, t)
+
+					// Convert the wanted YAML to a deployment.
+					wantYAML := wantYAMLs[i]
+					wantJSON := yamlToJSON(wantYAML, t)
+					wantDeployment := jsonToDeployment(wantJSON, t)
+
+					// Generate the patch.  At runtime, the webhook would actually generate the patch against the
+					// pod configuration. But since our input files are deployments, rather than actual pod instances,
+					// we have to apply the patch to the template portion of the deployment only.
+					templateJSON := convertToJSON(inputDeployment.Spec.Template, t)
+					got := webhook.inject(&v1beta1.AdmissionReview{
+						Request: &v1beta1.AdmissionRequest{
+							Object: runtime.RawExtension{
+								Raw: templateJSON,
+							},
+						},
+					})
+
+					// Apply the generated patch to the template.
+					patch := prettyJSON(got.Patch, t)
+					patchedTemplateJSON := applyJSONPatch(templateJSON, patch, t)
+					// Create the patched deployment. It's just a copy of the original, but with a patched template
+					// applied.
+					patchedDeployment := inputDeployment.DeepCopy()
+					patchedDeployment.Spec.Template.Reset()
+					if err := json.Unmarshal(patchedTemplateJSON, &patchedDeployment.Spec.Template); err != nil {
+						t.Fatal(err)
+					}
+
+					// normalize and compare the patched deployment with the one we expected.
+					err := normalizeAndCompareDeployments(patchedDeployment, wantDeployment, t)
+
+					if !util.Refresh() {
+						if err != nil {
+							t.Fatalf("Failed validating golden file %s:\n%v", c.wantFile, err)
+						}
+					} else {
+						if err != nil {
+							t.Logf("Updating %s", c.wantFile)
+						}
+						goldenYAMLs[i] = deploymentToYaml(patchedDeployment, t)
+					}
+				})
+			}
+			if util.Refresh() {
+				writeYamlsToGoldenFile(goldenYAMLs, wantFile, t)
+			}
+		})
+	}
+}
+
+func createTestWebhook(t testing.TB, sidecarTemplate string) (*Webhook, func()) {
+	mesh := model.DefaultMeshConfig()
+	dir, err := ioutil.TempDir("", "webhook_test")
+	if err != nil {
+		t.Fatalf("TempDir() failed: %v", err)
+	}
+	cleanup := func() {
+		os.RemoveAll(dir) // nolint: errcheck
+	}
+
+	return &Webhook{
+		sidecarConfig: &Config{
+			Policy:   InjectionPolicyEnabled,
+			Template: sidecarTemplate,
+		},
+		sidecarTemplateVersion: "unit-test-fake-version",
+		meshConfig:             &mesh,
+		valuesConfig:           getValuesWithHelm(nil, t),
+	}, cleanup
+}
+
+func createTestWebhookFromFile(templateFile string, t *testing.T) (*Webhook, func()) {
+	t.Helper()
+	sidecarTemplate := string(util.ReadFile(templateFile, t))
+	return createTestWebhook(t, sidecarTemplate)
+}
+
+func createTestWebhookFromHelmConfigMap(t *testing.T) (*Webhook, func()) {
+	t.Helper()
+	// Load the config map with Helm. This simulates what will be done at runtime, by replacing function calls and
+	// variables and generating a new configmap for use by the injection logic.
+	sidecarTemplate := loadConfigMapWithHelm(nil, t)
+	return createTestWebhook(t, sidecarTemplate)
+}
+
+type configMapBody struct {
+	Policy   string `yaml:"policy"`
+	Template string `yaml:"template"`
+}
+
+func loadSidecarTemplate(t testing.TB) string {
+	injectionConfig, err := ioutil.ReadFile(injectorConfig) // nolint: vetshadow
+	if err != nil {
+		t.Fatalf("failed to load sidecar template: %v", err)
+	}
+	return string(injectionConfig)
+}
+
+func getValues(params *Params, t testing.TB) string {
+	values := getHelmValues(t)
+	mergedValues := mergeParamsIntoHelmValues(params, values, t)
+	return mergedValues
+}
+
+func getValuesWithHelm(params *Params, t testing.TB) string {
+	c, err := chartutil.Load(helmChartDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := getHelmValues(t)
+	mergedValues := mergeParamsIntoHelmValues(params, values, t)
+	config := &chart.Config{Raw: mergedValues, Values: map[string]*chart.Value{}}
+
+	vals, err := chartutil.CoalesceValues(c, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yaml, err := vals.YAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return yaml
+}
+
+func loadConfigMapWithHelm(params *Params, t testing.TB) string {
+	t.Helper()
+	c, err := chartutil.Load(helmChartDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	values := getHelmValues(t)
+	mergedValues := mergeParamsIntoHelmValues(params, values, t)
+
+	config := &chart.Config{Raw: mergedValues, Values: map[string]*chart.Value{}}
+	options := chartutil.ReleaseOptions{
+		Name:      "istio",
+		Time:      timeconv.Now(),
+		Namespace: "",
+	}
+
+	vals, err := chartutil.ToRenderValuesCaps(c, config, options, &chartutil.Capabilities{TillerVersion: &tversion.Version{SemVer: "2.7.2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := engine.New().Render(c, vals)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f, ok := files[helmConfigMapKey]
+	if !ok {
+		t.Fatalf("Unable to located configmap file %s", helmConfigMapKey)
+	}
+
+	cfgMap := corev1.ConfigMap{}
+	err = yaml.Unmarshal([]byte(f), &cfgMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, ok := cfgMap.Data["config"]
+	if !ok {
+		t.Fatal("ConfigMap yaml missing config field")
+	}
+
+	body := &configMapBody{}
+	err = yaml.Unmarshal([]byte(cfg), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return body.Template
+}
+
+func getHelmValues(t testing.TB) string {
+	t.Helper()
+	valuesFile := filepath.Join(helmChartDirectory, helmValuesFile)
+	return string(util.ReadFile(valuesFile, t))
+}
+
+func mergeParamsIntoHelmValues(params *Params, vals string, t testing.TB) string {
+	t.Helper()
+	if params == nil {
+		return vals
+	}
+	valMap := chartutil.FromYaml(vals)
+	paramsVals := params.intoHelmValues()
+	for path, value := range paramsVals {
+		setStr := fmt.Sprintf("%s=%s", path, escapeHelmValue(value))
+		if err := strvals.ParseIntoString(setStr, valMap); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return chartutil.ToYaml(valMap)
+}
+
+func escapeHelmValue(val string) string {
+	if len(val) == 0 {
+		return val
+	}
+
+	if val[0] == '{' && val[len(val)-1] == '}' {
+		val := val[1 : len(val)-1]
+		val = strings.Replace(val, "{", "\\{", -1)
+		val = strings.Replace(val, "}", "\\}", -1)
+		val = strings.Replace(val, ".", "\\.", -1)
+		val = strings.Replace(val, "=", "\\=", -1)
+
+		return "{" + val + "}"
+	}
+
+	val = strings.Replace(val, ",", "\\,", -1)
+	val = strings.Replace(val, ".", "\\.", -1)
+	val = strings.Replace(val, "=", "\\=", -1)
+	return val
+}
+
+func splitYamlFile(yamlFile string, t *testing.T) [][]byte {
+	t.Helper()
+	yamlBytes := util.ReadFile(yamlFile, t)
+	return splitYamlBytes(yamlBytes, t)
+}
+
+func splitYamlBytes(yaml []byte, t *testing.T) [][]byte {
+	t.Helper()
+	stringParts := strings.Split(string(yaml), yamlSeparator)
+	byteParts := make([][]byte, 0)
+	for _, stringPart := range stringParts {
+		byteParts = append(byteParts, getInjectableYamlDocs(stringPart, t)...)
+	}
+	if len(byteParts) == 0 {
+		t.Skip("Found no injectable parts")
+	}
+	return byteParts
+}
+
+func writeYamlsToGoldenFile(yamls [][]byte, goldenFile string, t *testing.T) {
+	content := make([]byte, 0)
+	for _, part := range yamls {
+		content = append(content, part...)
+		content = append(content, []byte(yamlSeparator)...)
+		content = append(content, '\n')
+	}
+
+	util.RefreshGoldenFile(content, goldenFile, t)
+}
+func getInjectableYamlDocs(yamlDoc string, t *testing.T) [][]byte {
+	t.Helper()
+	m := make(map[string]interface{})
+	if err := yaml.Unmarshal([]byte(yamlDoc), &m); err != nil {
+		t.Fatal(err)
+	}
+	switch m["kind"] {
+	case "Deployment":
+		return [][]byte{[]byte(yamlDoc)}
+	case "DeploymentConfig":
+		return [][]byte{[]byte(yamlDoc)}
+	case "DaemonSet":
+		return [][]byte{[]byte(yamlDoc)}
+	case "StatefulSet":
+		return [][]byte{[]byte(yamlDoc)}
+	case "Job":
+		return [][]byte{[]byte(yamlDoc)}
+	case "ReplicaSet":
+		return [][]byte{[]byte(yamlDoc)}
+	case "ReplicationController":
+		return [][]byte{[]byte(yamlDoc)}
+	case "CronJob":
+		return [][]byte{[]byte(yamlDoc)}
+	case "List":
+		// Split apart the list into separate yaml documents.
+		out := make([][]byte, 0)
+		list := metav1.List{}
+		if err := yaml.Unmarshal([]byte(yamlDoc), &list); err != nil {
+			t.Fatal(err)
+		}
+		for _, i := range list.Items {
+			iout, err := yaml.Marshal(i)
+			if err != nil {
+				t.Fatal(err)
+			}
+			injectables := getInjectableYamlDocs(string(iout), t)
+			out = append(out, injectables...)
+		}
+		return out
+	default:
+		// No injectable parts.
+		return [][]byte{}
+	}
+}
+
+func convertToJSON(i interface{}, t *testing.T) []byte {
+	t.Helper()
+	outputJSON, err := json.Marshal(i)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prettyJSON(outputJSON, t)
+}
+
+func yamlToJSON(inputYAML []byte, t *testing.T) []byte {
+	t.Helper()
+	// Convert to JSON
+	out, err := yaml.YAMLToJSON(inputYAML)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	return prettyJSON(out, t)
+}
+
+func prettyJSON(inputJSON []byte, t *testing.T) []byte {
+	t.Helper()
+	// Pretty-print the JSON
+	var prettyBuffer bytes.Buffer
+	if err := json.Indent(&prettyBuffer, inputJSON, "", "  "); err != nil {
+		t.Fatalf(err.Error())
+	}
+	return prettyBuffer.Bytes()
+}
+
+func applyJSONPatch(input, patch []byte, t *testing.T) []byte {
+	t.Helper()
+	p, err := jsonpatch.DecodePatch(patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	patchedJSON, err := p.Apply(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prettyJSON(patchedJSON, t)
+}
+
+func jsonToDeployment(deploymentJSON []byte, t *testing.T) *appsv1.Deployment {
+	t.Helper()
+	var deployment appsv1.Deployment
+	if err := json.Unmarshal(deploymentJSON, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	return &deployment
+}
+
+func deploymentToYaml(deployment *appsv1.Deployment, t *testing.T) []byte {
+	t.Helper()
+	yaml, err := yaml.Marshal(deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return yaml
+}
+
+func normalizeAndCompareDeployments(got, want *appsv1.Deployment, t *testing.T) error {
+	t.Helper()
+	// Scrub unimportant fields that tend to differ.
+	getAnnotations(got)[annotationStatus] = getAnnotations(want)[annotationStatus]
+	gotIstioCerts := istioCerts(got)
+	wantIstioCerts := istioCerts(want)
+	gotIstioCerts.Secret.DefaultMode = wantIstioCerts.Secret.DefaultMode
+	gotIstioInit := istioInit(got, t)
+	wantIstioInit := istioInit(want, t)
+	gotIstioInit.Image = wantIstioInit.Image
+	gotIstioInit.TerminationMessagePath = wantIstioInit.TerminationMessagePath
+	gotIstioInit.TerminationMessagePolicy = wantIstioInit.TerminationMessagePolicy
+	gotIstioInit.SecurityContext.Privileged = wantIstioInit.SecurityContext.Privileged
+	gotIstioProxy := istioProxy(got, t)
+
+	wantIstioProxy := istioProxy(want, t)
+
+	gotIstioProxy.Image = wantIstioProxy.Image
+	gotIstioProxy.TerminationMessagePath = wantIstioProxy.TerminationMessagePath
+	gotIstioProxy.TerminationMessagePolicy = wantIstioProxy.TerminationMessagePolicy
+
+	envVars := make([]corev1.EnvVar, 0)
+	for _, env := range gotIstioProxy.Env {
+		if env.ValueFrom != nil {
+			env.ValueFrom.FieldRef.APIVersion = ""
+		}
+		// check if metajson is encoded correctly
+		if strings.HasPrefix(env.Name, "ISTIO_METAJSON_") {
+			var mm map[string]string
+			if err := json.Unmarshal([]byte(env.Value), &mm); err != nil {
+				t.Fatalf("unable to unmarshal %s: %v", env.Value, err)
+			}
+			continue
+		}
+		envVars = append(envVars, env)
+	}
+	gotIstioProxy.Env = envVars
+
+	marshaler := jsonpb.Marshaler{
+		Indent: "  ",
+	}
+	gotString, err := marshaler.MarshalToString(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantString, err := marshaler.MarshalToString(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return util.Compare([]byte(gotString), []byte(wantString))
+}
+
+func getAnnotations(d *appsv1.Deployment) map[string]string {
+	return d.Spec.Template.ObjectMeta.Annotations
+}
+
+func istioCerts(d *appsv1.Deployment) *corev1.Volume {
+	for i := 0; i < len(d.Spec.Template.Spec.Volumes); i++ {
+		v := &d.Spec.Template.Spec.Volumes[i]
+		if v.Name == "istio-certs" {
+			return v
+		}
+	}
+	return nil
+}
+
+func istioInit(d *appsv1.Deployment, t *testing.T) *corev1.Container {
+	t.Helper()
+	for i := 0; i < len(d.Spec.Template.Spec.InitContainers); i++ {
+		c := &d.Spec.Template.Spec.InitContainers[i]
+		if c.Name == "istio-init" {
+			return c
+		}
+	}
+	t.Fatal("Failed to find istio-init container")
+	return nil
+}
+
+func istioProxy(d *appsv1.Deployment, t *testing.T) *corev1.Container {
+	t.Helper()
+	for i := 0; i < len(d.Spec.Template.Spec.Containers); i++ {
+		c := &d.Spec.Template.Spec.Containers[i]
+		if c.Name == "istio-proxy" {
+			return c
+		}
+	}
+	t.Fatal("Failed to find istio-proxy container")
+	return nil
+}
+
 func makeTestData(t testing.TB, skip bool) []byte {
 	t.Helper()
 
@@ -252,14 +1221,15 @@ func makeTestData(t testing.TB, skip bool) []byte {
 			Annotations: map[string]string{},
 		},
 		Spec: corev1.PodSpec{
-			Volumes:        []corev1.Volume{{Name: "v0"}},
-			InitContainers: []corev1.Container{{Name: "c0"}},
-			Containers:     []corev1.Container{{Name: "c1"}},
+			Volumes:          []corev1.Volume{{Name: "v0"}},
+			InitContainers:   []corev1.Container{{Name: "c0"}},
+			Containers:       []corev1.Container{{Name: "c1"}},
+			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "p0"}},
 		},
 	}
 
 	if skip {
-		pod.ObjectMeta.Annotations[istioSidecarAnnotationPolicyKey] = "false"
+		pod.ObjectMeta.Annotations[annotationPolicy] = "false"
 	}
 
 	raw, err := json.Marshal(&pod)
@@ -302,9 +1272,10 @@ func createWebhook(t testing.TB, sidecarTemplate string) (*Webhook, func()) {
 		cleanup()
 		t.Fatalf("Could not marshal test injection config: %v", err)
 	}
-
+	valuesBytes := []byte(getValues(&Params{}, t))
 	var (
 		configFile = filepath.Join(dir, "config-file.yaml")
+		valuesFile = filepath.Join(dir, "values-file.yaml")
 		meshFile   = filepath.Join(dir, "mesh-file.yaml")
 		certFile   = filepath.Join(dir, "cert-file.yaml")
 		keyFile    = filepath.Join(dir, "key-file.yaml")
@@ -316,9 +1287,16 @@ func createWebhook(t testing.TB, sidecarTemplate string) (*Webhook, func()) {
 		t.Fatalf("WriteFile(%v) failed: %v", configFile, err)
 	}
 
+	if err := ioutil.WriteFile(valuesFile, valuesBytes, 0644); err != nil { // nolint: vetshadow
+		cleanup()
+		t.Fatalf("WriteFile(%v) failed: %v", valuesFile, err)
+	}
+
 	// mesh
 	mesh := model.DefaultMeshConfig()
-	m := jsonpb.Marshaler{}
+	m := jsonpb.Marshaler{
+		Indent: "  ",
+	}
 	var meshBytes bytes.Buffer
 	if err := m.Marshal(&meshBytes, &mesh); err != nil { // nolint: vetshadow
 		cleanup()
@@ -341,7 +1319,13 @@ func createWebhook(t testing.TB, sidecarTemplate string) (*Webhook, func()) {
 	}
 
 	wh, err := NewWebhook(WebhookParameters{
-		ConfigFile: configFile, MeshFile: meshFile, CertFile: certFile, KeyFile: keyFile, Port: port})
+		ConfigFile: configFile,
+		ValuesFile: valuesFile,
+		MeshFile:   meshFile,
+		CertFile:   certFile,
+		KeyFile:    keyFile,
+		Port:       port,
+	})
 	if err != nil {
 		cleanup()
 		t.Fatalf("NewWebhook() failed: %v", err)
@@ -350,17 +1334,6 @@ func createWebhook(t testing.TB, sidecarTemplate string) (*Webhook, func()) {
 }
 
 func TestRunAndServe(t *testing.T) {
-	var (
-		minimalSidecarTemplate = `
-initContainers:
-- name: istio-init
-containers:
-- name: istio-proxy
-volumes:
-- name: istio-envoy
-`
-	)
-
 	wh, cleanup := createWebhook(t, minimalSidecarTemplate)
 	defer cleanup()
 	stop := make(chan struct{})
@@ -379,10 +1352,7 @@ volumes:
          "name":"istio-init",
          "resources":{
 
-         },
-         "terminationMessagePath":"/dev/termination-log",
-         "terminationMessagePolicy":"File",
-         "imagePullPolicy":"IfNotPresent"
+         }
       }
    },
    {
@@ -392,27 +1362,28 @@ volumes:
          "name":"istio-proxy",
          "resources":{
 
-         },
-         "terminationMessagePath":"/dev/termination-log",
-         "terminationMessagePolicy":"File",
-         "imagePullPolicy":"IfNotPresent"
+         }
       }
    },
    {
       "op":"add",
       "path":"/spec/volumes/-",
       "value":{
-         "name":"istio-envoy",
-         "emptyDir":{
-
-         }
+         "name":"istio-envoy"
+      }
+   },
+   {
+      "op":"add",
+      "path":"/spec/imagePullSecrets/-",
+      "value":{
+         "name":"istio-image-pull-secrets"
       }
    },
    {
       "op":"add",
       "path":"/metadata/annotations",
       "value":{
-         "sidecar.istio.io/status":"{\"version\":\"d4935f8d2cac8a0d1549d3c6c61d512ba2e6822965f4f6b0863a98f73993dbf8\",\"initContainers\":[\"istio-init\"],\"containers\":[\"istio-proxy\"],\"volumes\":[\"istio-envoy\"]}"
+		  "sidecar.istio.io/status":"{\"version\":\"461c380844de8df1d1e2a80a09b6d7b58b8313c4a7d6796530eb124740a1440f\",\"initContainers\":[\"istio-init\"],\"containers\":[\"istio-proxy\"],\"volumes\":[\"istio-envoy\"],\"imagePullSecrets\":[\"istio-image-pull-secrets\"]}"
       }
    }
 ]`)
@@ -512,21 +1483,55 @@ volumes:
 	}
 }
 
+func TestReloadCert(t *testing.T) {
+	wh, cleanup := createWebhook(t, minimalSidecarTemplate)
+	defer cleanup()
+	stop := make(chan struct{})
+	defer func() { close(stop) }()
+	go wh.Run(stop)
+	checkCert(t, wh, testcerts.ServerCert, testcerts.ServerKey)
+	// Update cert/key files.
+	if err := ioutil.WriteFile(wh.certFile, rotatedCert, 0644); err != nil { // nolint: vetshadow
+		cleanup()
+		t.Fatalf("WriteFile(%v) failed: %v", wh.certFile, err)
+	}
+	if err := ioutil.WriteFile(wh.keyFile, rotatedKey, 0644); err != nil { // nolint: vetshadow
+		cleanup()
+		t.Fatalf("WriteFile(%v) failed: %v", wh.keyFile, err)
+	}
+	g := gomega.NewGomegaWithT(t)
+	g.Eventually(func() bool {
+		return checkCert(t, wh, rotatedCert, rotatedKey)
+	}, "10s", "100ms").Should(gomega.BeTrue())
+}
+
+func checkCert(t *testing.T, wh *Webhook, cert, key []byte) bool {
+	t.Helper()
+	actual, err := wh.getCert(nil)
+	if err != nil {
+		t.Fatalf("fail to get certificate from webhook: %s", err)
+	}
+	expected, err := tls.X509KeyPair(cert, key)
+	if err != nil {
+		t.Fatalf("fail to load test certs.")
+	}
+	return bytes.Equal(actual.Certificate[0], expected.Certificate[0])
+}
+
 func BenchmarkInjectServe(b *testing.B) {
 	mesh := model.DefaultMeshConfig()
 	params := &Params{
-		InitImage:       InitImageName(unitTestHub, unitTestTag, false),
-		ProxyImage:      ProxyImageName(unitTestHub, unitTestTag, false),
-		ImagePullPolicy: "IfNotPresent",
-		Verbosity:       DefaultVerbosity,
-		SidecarProxyUID: DefaultSidecarProxyUID,
-		Version:         "12345678",
-		Mesh:            &mesh,
+		InitImage:           InitImageName(unitTestHub, unitTestTag, false),
+		ProxyImage:          ProxyImageName(unitTestHub, unitTestTag, false),
+		ImagePullPolicy:     "IfNotPresent",
+		Verbosity:           DefaultVerbosity,
+		SidecarProxyUID:     DefaultSidecarProxyUID,
+		Version:             "12345678",
+		Mesh:                &mesh,
+		IncludeIPRanges:     DefaultIncludeIPRanges,
+		IncludeInboundPorts: DefaultIncludeInboundPorts,
 	}
-	sidecarTemplate, err := GenerateTemplateFromParams(params)
-	if err != nil {
-		b.Fatalf("GenerateTemplateFromParams(%v) failed: %v", params, err)
-	}
+	sidecarTemplate := loadConfigMapWithHelm(params, b)
 	wh, cleanup := createWebhook(b, sidecarTemplate)
 	defer cleanup()
 

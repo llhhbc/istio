@@ -1,10 +1,7 @@
-reviewers:
-  - ayj
-  - jmuk
-  - liamawhite
-  - nmittler
 approvers:
-  - ayj
-  - jmuk
+  - ozevren
   - liamawhite
   - nmittler
+  - esnible
+  - fisherxu
+  - irisdingbj

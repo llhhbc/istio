@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors
+// Copyright 2018 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,17 +15,54 @@
 package model_test
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/davecgh/go-spew/spew"
 
+	meshconfig "istio.io/api/mesh/v1alpha1"
 	mpb "istio.io/api/mixer/v1"
 	mccpb "istio.io/api/mixer/v1/config/client"
-	routing "istio.io/api/routing/v1alpha1"
+	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/model"
 )
+
+func TestApplyJSON(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    *meshconfig.MeshConfig
+		wantErr bool
+	}{
+		{
+			in:   `{"enableTracing": true}`,
+			want: &meshconfig.MeshConfig{EnableTracing: true},
+		},
+		{
+			in:   `{"enableTracing": true, "unknownField": "unknownValue"}`,
+			want: &meshconfig.MeshConfig{EnableTracing: true},
+		},
+	}
+	for i, c := range cases {
+		t.Run(fmt.Sprintf("[%v]", i), func(tt *testing.T) {
+			var got meshconfig.MeshConfig
+			err := model.ApplyJSON(c.in, &got)
+			if err != nil {
+				if !c.wantErr {
+					tt.Fatalf("got unexpected error: %v", err)
+				}
+			} else {
+				if c.wantErr {
+					tt.Fatal("unexpected success, expected error")
+				}
+				if !reflect.DeepEqual(&got, c.want) {
+					tt.Fatalf("ApplyJSON(%v): got %v want %v", c.in, &got, c.want)
+				}
+			}
+		})
+	}
+}
 
 func TestGogoProtoSchemaConversions(t *testing.T) {
 	msg := &mccpb.HTTPAPISpec{
@@ -33,12 +70,12 @@ func TestGogoProtoSchemaConversions(t *testing.T) {
 			Attributes: map[string]*mpb.Attributes_AttributeValue{
 				"api.service": {
 					Value: &mpb.Attributes_AttributeValue_StringValue{
-						"my-service",
+						StringValue: "my-service",
 					},
 				},
 				"api.version": {
 					Value: &mpb.Attributes_AttributeValue_StringValue{
-						"1.0.0",
+						StringValue: "1.0.0",
 					},
 				},
 			},
@@ -49,7 +86,7 @@ func TestGogoProtoSchemaConversions(t *testing.T) {
 					Attributes: map[string]*mpb.Attributes_AttributeValue{
 						"api.operation": {
 							Value: &mpb.Attributes_AttributeValue_StringValue{
-								"createPet",
+								StringValue: "createPet",
 							},
 						},
 					},
@@ -63,7 +100,7 @@ func TestGogoProtoSchemaConversions(t *testing.T) {
 		ApiKeys: []*mccpb.APIKey{
 			{
 				Key: &mccpb.APIKey_Query{
-					"api_key",
+					Query: "api_key",
 				},
 			},
 		},
@@ -222,70 +259,59 @@ patterns:
 }
 
 func TestProtoSchemaConversions(t *testing.T) {
-	routeRuleSchema := &model.ProtoSchema{MessageName: model.RouteRule.MessageName}
+	destinationRuleSchema := &model.ProtoSchema{MessageName: model.DestinationRule.MessageName}
 
-	msg := &routing.RouteRule{
-		Destination: &routing.IstioService{
-			Name: "foo",
+	msg := &networking.DestinationRule{
+		Host: "something.svc.local",
+		TrafficPolicy: &networking.TrafficPolicy{
+			LoadBalancer: &networking.LoadBalancerSettings{
+				LbPolicy: &networking.LoadBalancerSettings_Simple{},
+			},
 		},
-		Precedence: 5,
-		Route: []*routing.DestinationWeight{
-			{Destination: &routing.IstioService{Name: "bar"}, Weight: 75},
-			{Destination: &routing.IstioService{Name: "baz"}, Weight: 25},
+		Subsets: []*networking.Subset{
+			{
+				Name: "foo",
+				Labels: map[string]string{
+					"test": "label",
+				},
+			},
 		},
 	}
 
 	wantJSON := `
-	{
-		"destination": {
-			"name": "foo"
-		},
-		"precedence": 5,
-		"route": [
 		{
-			"destination": {
-				"name" : "bar"
-			},
-			"weight": 75
-		},
-		{
-			"destination": {
-				"name" : "baz"
-			},
-			"weight": 25
-		}
-		]
-	}
-	`
+      "host":"something.svc.local",
+      "trafficPolicy": {
+        "loadBalancer":{"simple":"ROUND_ROBIN"}
+       },
+       "subsets": [
+         {"name":"foo","labels":{"test":"label"}}
+       ]
+		}`
 
-	wantYAML := "destination:\n" +
-		"  name: foo\n" +
-		"precedence: 5\n" +
-		"route:\n" +
-		"- destination:\n" +
-		"    name: bar\n" +
-		"  weight: 75\n" +
-		"- destination:\n" +
-		"    name: baz\n" +
-		"  weight: 25\n"
+	wantYAML := `host: something.svc.local
+subsets:
+- labels:
+    test: label
+  name: foo
+trafficPolicy:
+  loadBalancer:
+    simple: ROUND_ROBIN
+`
 
 	wantJSONMap := map[string]interface{}{
-		"destination": map[string]interface{}{
-			"name": "foo",
-		},
-		"precedence": 5.0,
-		"route": []interface{}{
-			map[string]interface{}{
-				"destination": map[string]interface{}{
-					"name": "bar",
-				},
-				"weight": 75.0,
+		"host": "something.svc.local",
+		"trafficPolicy": map[string]interface{}{
+			"loadBalancer": map[string]interface{}{
+				"simple": "ROUND_ROBIN",
 			},
+		},
+		"subsets": []interface{}{
 			map[string]interface{}{
-				"destination": map[string]interface{}{
-					"name": "baz",
+				"name": "foo",
+				"labels": map[string]interface{}{
+					"test": "label",
 				},
-				"weight": 25.0,
 			},
 		},
 	}
@@ -307,7 +333,7 @@ func TestProtoSchemaConversions(t *testing.T) {
 		t.Error("should produce an error")
 	}
 
-	gotFromJSON, err := routeRuleSchema.FromJSON(wantJSON)
+	gotFromJSON, err := destinationRuleSchema.FromJSON(wantJSON)
 	if err != nil {
 		t.Errorf("FromJSON failed: %v", err)
 	}
@@ -327,7 +353,7 @@ func TestProtoSchemaConversions(t *testing.T) {
 		t.Error("should produce an error")
 	}
 
-	gotFromYAML, err := routeRuleSchema.FromYAML(wantYAML)
+	gotFromYAML, err := destinationRuleSchema.FromYAML(wantYAML)
 	if err != nil {
 		t.Errorf("FromYAML failed: %v", err)
 	}
@@ -335,7 +361,7 @@ func TestProtoSchemaConversions(t *testing.T) {
 		t.Errorf("FromYAML failed: got %+v want %+v", spew.Sdump(gotFromYAML), spew.Sdump(msg))
 	}
 
-	if _, err = routeRuleSchema.FromYAML(":"); err == nil {
+	if _, err = destinationRuleSchema.FromYAML(":"); err == nil {
 		t.Errorf("should produce an error")
 	}
 
@@ -351,7 +377,7 @@ func TestProtoSchemaConversions(t *testing.T) {
 		t.Error("should produce an error")
 	}
 
-	gotFromJSONMap, err := routeRuleSchema.FromJSONMap(wantJSONMap)
+	gotFromJSONMap, err := destinationRuleSchema.FromJSONMap(wantJSONMap)
 	if err != nil {
 		t.Errorf("FromJSONMap failed: %v", err)
 	}
@@ -359,10 +385,10 @@ func TestProtoSchemaConversions(t *testing.T) {
 		t.Errorf("FromJSONMap failed: got %+v want %+v", spew.Sdump(gotFromJSONMap), spew.Sdump(msg))
 	}
 
-	if _, err = routeRuleSchema.FromJSONMap(1); err == nil {
+	if _, err = destinationRuleSchema.FromJSONMap(1); err == nil {
 		t.Error("should produce an error")
 	}
-	if _, err = routeRuleSchema.FromJSON(":"); err == nil {
+	if _, err = destinationRuleSchema.FromJSON(":"); err == nil {
 		t.Errorf("should produce an error")
 	}
 }

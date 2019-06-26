@@ -31,6 +31,7 @@ import (
 	"golang.org/x/tools/imports"
 
 	istio_policy_v1beta1 "istio.io/api/policy/v1beta1"
+	descriptor2 "istio.io/istio/mixer/pkg/protobuf/descriptor"
 	tmplPkg "istio.io/istio/mixer/tools/codegen/pkg/bootstrapgen/template"
 	"istio.io/istio/mixer/tools/codegen/pkg/modelgen"
 )
@@ -70,7 +71,9 @@ var aliasTypes = map[string]string{
 	"adapter.DNSName":      strString,
 	"adapter.EmailAddress": strString,
 	"adapter.URI":          strString,
-	"net.IP":               "[]uint8",
+	"net.IP":               "[]byte",
+	"int":                  strInt64,
+	"map[string]string":    "attribute.WrapStringMap",
 }
 
 func containsValueTypeOrResMsg(ti modelgen.TypeInfo) bool {
@@ -91,6 +94,12 @@ const templateName = "Template"
 // Generate creates a Go file that will be build inside mixer framework. The generated file contains all the
 // template specific code that mixer needs to add support for different passed in templates.
 func (g *Generator) Generate(fdsFiles map[string]string) error {
+	return g.generateInternal(fdsFiles, tmplPkg.BootstrapTemplate, modelgen.Create)
+}
+
+func (g *Generator) generateInternal(fdsFiles map[string]string,
+	tmplContent string,
+	createModel func(parser *descriptor2.FileDescriptorSetParser) (*modelgen.Model, error)) error {
 	imprts := make([]string, 0)
 	tmpl, err := template.New("MixerBootstrap").Funcs(
 		template.FuncMap{
@@ -106,13 +115,6 @@ func (g *Generator) Generate(fdsFiles map[string]string) error {
 			},
 			"getAliasType": func(goType string) string {
 				return aliasTypes[goType]
-			},
-			"isAliasTypeSkipIp": func(goType string) bool {
-				if "net.IP" == goType {
-					return false
-				}
-				_, found := aliasTypes[goType]
-				return found
 			},
 			"containsValueTypeOrResMsg": containsValueTypeOrResMsg,
 			"reportTypeUsed": func(ti modelgen.TypeInfo) string {
@@ -235,7 +237,7 @@ func (g *Generator) Generate(fdsFiles map[string]string) error {
 					return "vIface"
 				}
 			},
-		}).Parse(tmplPkg.InterfaceTemplate)
+		}).Parse(tmplContent)
 
 	if err != nil {
 		return fmt.Errorf("cannot load template: %v", err)
@@ -255,14 +257,10 @@ func (g *Generator) Generate(fdsFiles map[string]string) error {
 			return fmt.Errorf("cannot parse file '%s' as a FileDescriptorSetProto. %v", fds, err)
 		}
 
-		var parser *modelgen.FileDescriptorSetParser
-		parser, err = modelgen.CreateFileDescriptorSetParser(fds, g.ImportMapping, fdsFiles[fdsPath])
-		if err != nil {
-			return fmt.Errorf("cannot parse file '%s' as a FileDescriptorSetProto. %v", fds, err)
-		}
+		parser := descriptor2.CreateFileDescriptorSetParser(fds, g.ImportMapping, fdsFiles[fdsPath])
 
 		var model *modelgen.Model
-		if model, err = modelgen.Create(parser); err != nil {
+		if model, err = createModel(parser); err != nil {
 			return err
 		}
 
@@ -280,7 +278,7 @@ func (g *Generator) Generate(fdsFiles map[string]string) error {
 	bytesWithImpts := bytes.Replace(buf.Bytes(), []byte("$$additional_imports$$"), []byte(strings.Join(imprts, "\n")), 1)
 	fmtd, err := format.Source(bytesWithImpts)
 	if err != nil {
-		return fmt.Errorf("could not format generated code: %v. Source code is %s", err, buf.String())
+		return fmt.Errorf("could not format generated code: %v. Source code is %s", err, string(bytesWithImpts))
 	}
 
 	imports.LocalPrefix = "istio.io"
@@ -296,13 +294,11 @@ func (g *Generator) Generate(fdsFiles map[string]string) error {
 	}
 	defer func() { _ = f.Close() }() // nolint: gas
 	if _, err = f.Write(imptd); err != nil {
-		_ = f.Close()           // nolint: gas
 		_ = os.Remove(f.Name()) // nolint: gas
 		return err
 	}
 	return nil
 }
-
 func getParentDirName(filePath string) string {
 	return filepath.Base(filepath.Dir(filePath))
 }

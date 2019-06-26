@@ -17,12 +17,12 @@ package integration
 import (
 	"fmt"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
-	"istio.io/istio/pkg/log"
-	"istio.io/istio/tests/integration/framework"
+	"istio.io/istio/tests/integration_old/framework"
+	"istio.io/pkg/log"
 )
 
 type (
@@ -39,7 +39,7 @@ type (
 )
 
 const (
-	istioCaWithGivenCertificate = "istio-ca-with-given-certificate"
+	citadelWithGivenCertificate = "citadel-with-given-certificate"
 	nodeAgent                   = "node-agent"
 	nodeAgentService            = "node-agent-service"
 	podGroupPostfix             = "-pod-group"
@@ -82,19 +82,19 @@ func (env *NodeAgentTestEnv) GetComponents() []framework.Component {
 			NewKubernetesPod(
 				env.ClientSet,
 				env.NameSpace,
-				istioCaWithGivenCertificate,
-				fmt.Sprintf("%v/istio-ca-test:%v", env.Hub, env.Tag),
+				citadelWithGivenCertificate,
+				fmt.Sprintf("%v/citadel-test:%v", env.Hub, env.Tag),
 				[]string{},
 				[]string{},
 			),
 			NewKubernetesService(
 				env.ClientSet,
 				env.NameSpace,
-				"istio-ca",
+				"istio-citadel",
 				v1.ServiceTypeClusterIP,
 				8060,
 				map[string]string{
-					"pod-group": istioCaWithGivenCertificate + podGroupPostfix,
+					"pod-group": citadelWithGivenCertificate + podGroupPostfix,
 				},
 				map[string]string{
 					kube.KubeServiceAccountsOnVMAnnotation: "nodeagent.google.com",

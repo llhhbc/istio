@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors. All Rights Reserved.
+// Copyright 2017 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package faultInject
+package client_test
 
 import (
 	"fmt"
@@ -25,9 +25,11 @@ import (
 const reportAttributes = `
 {
   "context.protocol": "http",
+  "context.proxy_error_code": "FI",
+  "context.reporter.uid": "",
   "mesh1.ip": "[1 1 1 1]",
   "mesh2.ip": "[0 0 0 0 0 0 0 0 0 0 255 255 204 152 189 116]",
-  "mesh3.ip": "[0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 8]",
+  "origin.ip": "[127 0 0 1]",
   "request.host": "*",
   "request.path": "/echo",
   "request.time": "*",
@@ -36,6 +38,8 @@ const reportAttributes = `
   "request.scheme": "http",
   "source.uid": "POD11",
   "source.namespace": "XYZ11",
+  "destination.uid": "",
+  "destination.namespace": "",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",
@@ -60,17 +64,30 @@ const reportAttributes = `
      "content-length": "18",
      ":status": "503",
      "server": "envoy"
-  }
+  },
+  "response.total_size": "*",
+  "request.total_size": 0,
+  "request.url_path": "/echo"
 }
+`
+
+const allAbortFaultFilter = `
+- name: envoy.fault
+  config:
+    abort:
+      percentage:
+        numerator: 100
+        denominator: HUNDRED
+      http_status: 503
 `
 
 func TestFaultInject(t *testing.T) {
 	s := env.NewTestSetup(env.FaultInjectTest, t)
-	s.SetFaultInject(true)
+	s.SetFiltersBeforeMixer(allAbortFaultFilter)
 	// fault injection filer is before mixer filter.
 	// If a request is rejected, per-route service config could not
 	// be used, has to use default service_configs map to send Report.
-	env.SetDefaultServiceConfigMap(s.V2())
+	env.SetDefaultServiceConfigMap(s.MfConfig())
 
 	if err := s.SetUp(); err != nil {
 		t.Fatalf("Failed to setup test: %v", err)

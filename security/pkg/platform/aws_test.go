@@ -21,7 +21,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"testing"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -89,7 +88,6 @@ func TestNewAwsClientImpl(t *testing.T) {
 }
 
 func TestAwsGetInstanceIdentityDocument(t *testing.T) {
-	t.Skip("https://github.com/istio/istio/issues/3177")
 	testCases := map[string]struct {
 		sigFile              string
 		doc                  string
@@ -193,13 +191,12 @@ func TestAwsGetServiceIdentity(t *testing.T) {
 			t.Fatalf("%s: Unexpected Error: %v", id, err)
 		} else if serviceIdentity != c.expectedServiceIdentity {
 			t.Errorf("%s: Wrong Service Identity. Expected %v, Actual %v", id,
-				string(c.expectedServiceIdentity), string(serviceIdentity))
+				c.expectedServiceIdentity, serviceIdentity)
 		}
 	}
 }
 
 func TestGetGetAgentCredential(t *testing.T) {
-	t.Skip("https://github.com/istio/istio/issues/3177")
 	testCases := map[string]struct {
 		sigFile            string
 		doc                string
@@ -276,9 +273,6 @@ func TestAwsGetDialOptions(t *testing.T) {
 		"Bad DialOptions": {
 			expectedErr:  "open testdata/cert-chain-good_not_exist.pem: no such file or directory",
 			rootCertFile: "testdata/cert-chain-good_not_exist.pem",
-			expectedOptions: []grpc.DialOption{
-				grpc.WithTransportCredentials(creds),
-			},
 		},
 	}
 
@@ -304,12 +298,6 @@ func TestAwsGetDialOptions(t *testing.T) {
 			t.Fatalf("%s: Wrong dial options size. Expected %v, Actual %v",
 				id, len(c.expectedOptions), len(options))
 		}
-
-		for index, option := range c.expectedOptions {
-			if reflect.ValueOf(options[index]).Pointer() != reflect.ValueOf(option).Pointer() {
-				t.Errorf("%s: Wrong option found", id)
-			}
-		}
 	}
 }
 
@@ -330,7 +318,7 @@ func TestAwsGetCredentialTypes(t *testing.T) {
 		credentialType := awsc.GetCredentialType()
 		if credentialType != c.expectedType {
 			t.Errorf("%s: Wrong Credential Type. Expected %v, Actual %v", id,
-				string(c.expectedType), string(credentialType))
+				c.expectedType, credentialType)
 		}
 	}
 }

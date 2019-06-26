@@ -18,42 +18,51 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"strings"
 	"time"
 
-	"google.golang.org/grpc/balancer"
+	"google.golang.org/grpc"
 
-	"istio.io/istio/pkg/probe"
-	"istio.io/istio/security/pkg/caclient/grpc"
+	"istio.io/istio/security/pkg/caclient/protocol"
 	"istio.io/istio/security/pkg/pki/ca"
 	"istio.io/istio/security/pkg/pki/util"
 	"istio.io/istio/security/pkg/platform"
 	pb "istio.io/istio/security/proto"
+	"istio.io/pkg/log"
+	"istio.io/pkg/probe"
 )
 
 const (
 	// LivenessProbeClientIdentity is the default identity for the liveness probe check
 	LivenessProbeClientIdentity   = "k8s.cluster.local"
 	probeCheckRequestedTTLMinutes = 60
+	// logEveryNChecks specifies we log once in every N successful checks.
+	logEveryNChecks = 100
 )
+
+// CAProtocolProvider returns a CAProtocol instance for talking to CA.
+type CAProtocolProvider func(caAddress string, dialOpts []grpc.DialOption) (protocol.CAProtocol, error)
+
+// GrpcProtocolProvider returns a CAProtocol instance talking to CA via gRPC.
+func GrpcProtocolProvider(caAddress string, dialOpts []grpc.DialOption) (protocol.CAProtocol, error) {
+	return protocol.NewGrpcConnection(caAddress, dialOpts)
+}
 
 // LivenessCheckController updates the availability of the liveness probe of the CA instance
 type LivenessCheckController struct {
 	interval           time.Duration
-	grpcHostname       string
-	grpcPort           int
 	serviceIdentityOrg string
 	rsaKeySize         int
+	caAddress          string
 	ca                 *ca.IstioCA
 	livenessProbe      *probe.Probe
-	client             grpc.CAGrpcClient
+	provider           CAProtocolProvider
+	checkCount         int
 }
 
 // NewLivenessCheckController creates the liveness check controller instance
-func NewLivenessCheckController(probeCheckInterval time.Duration,
-	grpcHostname string, grpcPort int, ca *ca.IstioCA, livenessProbeOptions *probe.Options,
-	client grpc.CAGrpcClient) (*LivenessCheckController, error) {
-
+func NewLivenessCheckController(probeCheckInterval time.Duration, caAddr string,
+	ca *ca.IstioCA, livenessProbeOptions *probe.Options,
+	provider CAProtocolProvider) (*LivenessCheckController, error) {
 	livenessProbe := probe.NewProbe()
 	livenessProbeController := probe.NewFileController(livenessProbeOptions)
 	livenessProbe.RegisterProbe(livenessProbeController, "liveness")
@@ -64,20 +73,16 @@ func NewLivenessCheckController(probeCheckInterval time.Duration,
 
 	return &LivenessCheckController{
 		interval:      probeCheckInterval,
-		grpcHostname:  grpcHostname,
-		grpcPort:      grpcPort,
 		rsaKeySize:    2048,
 		livenessProbe: livenessProbe,
 		ca:            ca,
-		client:        client,
+		caAddress:     caAddr,
+		provider:      provider,
+		checkCount:    0,
 	}, nil
 }
 
 func (c *LivenessCheckController) checkGrpcServer() error {
-	if c.grpcPort <= 0 {
-		return nil
-	}
-
 	// generates certificate and private key for test
 	opts := util.CertOptions{
 		Host:       LivenessProbeClientIdentity,
@@ -89,9 +94,9 @@ func (c *LivenessCheckController) checkGrpcServer() error {
 		return err
 	}
 
-	certPEM, err := c.ca.Sign(csrPEM, c.interval, false)
-	if err != nil {
-		return err
+	certPEM, signErr := c.ca.Sign(csrPEM, []string{LivenessProbeClientIdentity}, c.interval, false)
+	if signErr != nil {
+		return signErr.(ca.Error)
 	}
 
 	// Store certificate chain and private key to generate CSR
@@ -135,19 +140,31 @@ func (c *LivenessCheckController) checkGrpcServer() error {
 	}
 
 	// Generate csr and credential
-	pc := platform.NewOnPremClientImpl(testRoot.Name(), testKey.Name(), testCert.Name())
+	pc, err := platform.NewOnPremClientImpl(testRoot.Name(), testKey.Name(), testCert.Name())
+	if err != nil {
+		return err
+	}
 
-	csr, _, err := util.GenCSR(util.CertOptions{
+	csr, privKeyBytes, err := util.GenCSR(util.CertOptions{
 		Host:       LivenessProbeClientIdentity,
 		Org:        c.serviceIdentityOrg,
 		RSAKeySize: c.rsaKeySize,
 	})
+	if err != nil {
+		return err
+	}
 
+	dialOpts, err := pc.GetDialOptions()
 	if err != nil {
 		return err
 	}
 
 	cred, err := pc.GetAgentCredential()
+	if err != nil {
+		return err
+	}
+	caProtocol, err := c.provider(c.caAddress, dialOpts)
+
 	if err != nil {
 		return err
 	}
@@ -158,13 +175,31 @@ func (c *LivenessCheckController) checkGrpcServer() error {
 		CredentialType:      pc.GetCredentialType(),
 		RequestedTtlMinutes: probeCheckRequestedTTLMinutes,
 	}
+	resp, err := caProtocol.SendCSR(req)
 
-	_, err = c.client.SendCSR(req, pc, fmt.Sprintf("%v:%v", c.grpcHostname, c.grpcPort))
-	if err != nil && strings.Contains(err.Error(), balancer.ErrTransientFailure.Error()) {
-		return nil
+	if err != nil {
+		return err
+	}
+	if resp == nil {
+		return fmt.Errorf("CSR sign failure: response is nil")
+	}
+	if !resp.IsApproved {
+		return fmt.Errorf("CSR sign failure: request is not approaved")
+	}
+	if vErr := util.Verify(resp.SignedCert, privKeyBytes, resp.CertChain, rootCertBytes); vErr != nil {
+		err := fmt.Errorf("CSR sign failure: %v", vErr)
+		log.Errora(err)
+		return err
 	}
 
-	return err
+	c.checkCount++
+	if c.checkCount%logEveryNChecks == 1 {
+		log.Infof("CSR signing service is healthy (logged every %d times).", logEveryNChecks)
+	}
+
+	log.Debugf("CSR signing service is healthy.")
+
+	return nil
 }
 
 // Run starts the check routine

@@ -1,4 +1,4 @@
-FROM    circleci/golang:1.10
+FROM    circleci/golang:1.12
 
 # The base circleci image runs as user 'circleci'(3434), with sudo capabilities.
 # Based on Debian9. Go installed in /usr/local/go
@@ -11,7 +11,7 @@ FROM    circleci/golang:1.10
 
 # Also installed docker, docker-compose, dockerize, jq
 
-ARG     K8S_VER=v1.9.2
+ARG     K8S_VER=v1.10.4
 ARG     ETCD_VER=v3.2.15
 ARG     MINIKUBE_VER=v0.25.0
 ARG     HELM_VER=v2.7.2
@@ -66,3 +66,10 @@ RUN cd /tmp && \
     sudo mv linux-amd64/helm /usr/local/bin && \
     rm -rf helm.tgz linux-amd64
 
+# Install protoc for protoc-gen-* testing
+RUN cd /tmp && \
+    curl -Lo /tmp/protoc.zip https://github.com/google/protobuf/releases/download/v3.8.0/protoc-3.8.0-linux-x86_64.zip && \
+    unzip protoc.zip -d protoc3 && \
+    sudo mv protoc3/bin/* /usr/local/bin/ && \
+    sudo mv protoc3/include/* /usr/local/include/ && \
+    rm -rf protoc.zip protoc3

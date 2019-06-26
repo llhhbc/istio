@@ -22,8 +22,20 @@ import (
 	"istio.io/istio/mixer/pkg/adapter"
 )
 
-// The `checknothing` template represents an empty block of data, which can useful
+// The `checknothing` template represents an empty block of data, which can be useful
 // in different testing scenarios.
+//
+// Example config:
+//
+// ```yaml
+// apiVersion: "config.istio.io/v1alpha2"
+// kind: instance
+// metadata:
+//   name: denyrequest
+//   namespace: istio-system
+// spec:
+//   compiledTemplate: checknothing
+// ```
 
 // Fully qualified name of the template
 const TemplateName = "checknothing"
@@ -33,16 +45,6 @@ const TemplateName = "checknothing"
 // CheckNothing represents an empty block of data that is used for Check-capable
 // adapters which don't require any parameters. This is primarily intended for testing
 // scenarios.
-//
-// Example config:
-// ```yaml
-// apiVersion: "config.istio.io/v1alpha2"
-// kind: checknothing
-// metadata:
-//   name: denyrequest
-//   namespace: istio-system
-// spec:
-// ```
 type Instance struct {
 	// Name of the instance as specified in configuration.
 	Name string

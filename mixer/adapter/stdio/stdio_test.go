@@ -25,7 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
 	descriptor "istio.io/api/policy/v1beta1"
@@ -141,12 +140,12 @@ func TestBuilder(t *testing.T) {
 
 	for i, c := range cases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			zb := func(options *config.Params) (*zap.Logger, func(), error) {
+			zb := func(options *config.Params) (zapcore.Core, func(), error) {
 				if c.induceError {
 					return nil, func() {}, errors.New("expected")
 				}
 
-				return newZapLogger(options)
+				return newZapCore(options)
 			}
 
 			info := GetInfo()
@@ -170,6 +169,10 @@ func TestBuilder(t *testing.T) {
 				handler := h.(*handler)
 				if handler.metricLevel != c.metricLevel {
 					t.Errorf("Got metric level %v, expecting %v", handler.metricLevel, c.metricLevel)
+				}
+
+				if err = h.Close(); err != nil {
+					t.Errorf("Got %v, expected success", err)
 				}
 			}
 		})
@@ -199,7 +202,7 @@ func TestLogEntry(t *testing.T) {
 		},
 	}
 
-	tm := time.Date(2017, time.August, 21, 10, 4, 00, 0, time.UTC)
+	tm := time.Date(2017, time.August, 21, 10, 4, 0, 0, time.UTC)
 
 	cases := []struct {
 		instances []*logentry.Instance
@@ -219,8 +222,8 @@ func TestLogEntry(t *testing.T) {
 						"Time":      tm,
 						"Duration":  1 * time.Second,
 						"StringMap": map[string]string{"A": "B", "C": "D"},
-						"IPAddress": net.IPv4zero,
 						"Bytes":     []byte{'b'},
+						"IPAddress": []byte(net.ParseIP("1.0.0.127")),
 						"DNSName":   "foo.bar.com",
 						"URL":       "http://foo.com",
 						"EmailAddr": "foo@bar.com",
@@ -238,7 +241,7 @@ func TestLogEntry(t *testing.T) {
 					`"Double":1.23,` +
 					`"Duration":"1s",` +
 					`"EmailAddr":"foo@bar.com",` +
-					`"IPAddress":"0.0.0.0",` +
+					`"IPAddress":"1.0.0.127",` +
 					`"Int64":123,` +
 					`"String":"a string",` +
 					`"StringMap":{"A":"B","C":"D"},` +
@@ -440,7 +443,7 @@ func TestMetricEntry(t *testing.T) {
 		},
 	}
 
-	tm := time.Date(2017, time.August, 21, 10, 4, 00, 0, time.UTC)
+	tm := time.Date(2017, time.August, 21, 10, 4, 0, 0, time.UTC)
 
 	cases := []struct {
 		instances   []*metric.Instance

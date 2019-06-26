@@ -15,308 +15,276 @@
 package integration_test
 
 import (
-	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
-	"path"
-	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"code.cloudfoundry.org/copilot/api"
-	"code.cloudfoundry.org/copilot/testhelpers"
+	"github.com/gogo/protobuf/types"
 	"github.com/onsi/gomega"
-	"github.com/onsi/gomega/gbytes"
-	"github.com/onsi/gomega/gexec"
-	"google.golang.org/grpc"
 
+	meshconfig "istio.io/api/mesh/v1alpha1"
+	networking "istio.io/api/networking/v1alpha3"
+	mixerEnv "istio.io/istio/mixer/test/client/env"
+	"istio.io/istio/pilot/pkg/bootstrap"
 	"istio.io/istio/pilot/pkg/model"
-	envoy "istio.io/istio/pilot/pkg/proxy/envoy/v1"
-	"istio.io/istio/pilot/pkg/serviceregistry/cloudfoundry"
-	"istio.io/istio/pkg/log"
-	"istio.io/istio/tests/e2e/tests/pilot/cloudfoundry/mock"
+	"istio.io/istio/pilot/pkg/serviceregistry"
+	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
+	srmemory "istio.io/istio/pilot/pkg/serviceregistry/memory"
+	"istio.io/istio/pkg/mcp/snapshot"
+	"istio.io/istio/pkg/mcp/source"
+	mcptesting "istio.io/istio/pkg/mcp/testing"
+	"istio.io/istio/pkg/mcp/testing/groups"
+	"istio.io/istio/pkg/test/env"
+	"istio.io/istio/tests/util"
 )
 
 const (
-	pilotPort   = 5555
-	copilotPort = 5556
+	pilotDebugPort     = 5555
+	pilotGrpcPort      = 15010
+	sidecarServicePort = 15022
 
-	internalAppName  = "example-app-guid.apps.cloudfoundry.internal"
-	internalAppName2 = "example2-app-guid.apps.cloudfoundry.internal"
-	publicRouteName  = "public.example.com"
-	publicRouteName2 = "public2.example.com"
-	publicPort       = 10080
-	backendPort      = 61005
-	backendPort2     = 61006
+	cfRouteOne      = "public.example.com"
+	cfRouteTwo      = "public2.example.com"
+	cfInternalRoute = "something.apps.internal"
+	cfPath          = "/some/path"
+	subsetOne       = "capi-guid-1"
+	subsetTwo       = "capi-guid-2"
+	publicPort      = 10080
+	app1ListenPort  = 61005
+	app2ListenPort  = 61006
+	app3ListenPort  = 6868
+
+	ingressGatewaySvc = "cloudfoundry-ingress.istio-system.svc.cluster.local"
 )
+
+var gatewaySvc = srmemory.MakeService(ingressGatewaySvc, "11.0.0.1")
+var gatewayInstance = srmemory.MakeIP(gatewaySvc, 0)
 
 func pilotURL(path string) string {
 	return (&url.URL{
 		Scheme: "http",
-		Host:   fmt.Sprintf("127.0.0.1:%d", pilotPort),
+		Host:   fmt.Sprintf("127.0.0.1:%d", pilotDebugPort),
 		Path:   path,
 	}).String()
 }
 
-var routeRule = fmt.Sprintf(`
-apiVersion: config.istio.io/v1alpha2
-kind: VirtualService
-metadata:
-  name: route-for-myapp
-spec:
-  hosts:
-  - %s
-  gateways:
-  - cloudfoundry-ingress
-  http:
-  - route:
-    - destination:
-        name: example-app-guid.apps.cloudfoundry.internal
-`, publicRouteName)
+var fakeCreateTime2 = time.Date(2018, time.January, 1, 2, 3, 4, 5, time.UTC)
 
-var routeRule2 = fmt.Sprintf(`
-apiVersion: config.istio.io/v1alpha2
-kind: VirtualService
-metadata:
-  name: route-for-other-app
-spec:
-  hosts:
-  - %s
-  gateways:
-  - cloudfoundry-ingress
-  http:
-  - route:
-    - destination:
-        name: example2-app-guid.apps.cloudfoundry.internal
-`, publicRouteName2)
+type mockController struct{}
 
-var gatewayConfig = fmt.Sprintf(`
-apiVersion: config.istio.io/v1alpha2
-kind: Gateway
-metadata:
-  name: cloudfoundry-ingress
-spec:
-  servers:
-  - port:
-      number: %d  # load balancer will forward traffic here
-      protocol: http
-    hosts:
-    - "*.example.com"
-`, publicPort)
+func (c *mockController) AppendServiceHandler(f func(*model.Service, model.Event)) error {
+	return nil
+}
+
+func (c *mockController) AppendInstanceHandler(f func(*model.ServiceInstance, model.Event)) error {
+	return nil
+}
+
+func (c *mockController) Run(<-chan struct{}) {}
 
 func TestWildcardHostEdgeRouterWithMockCopilot(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	runFakeApp(backendPort)
-	t.Logf("1st backend is running on port %d", backendPort)
+	runFakeApp(app1ListenPort)
+	t.Logf("1st backend is running on port %d", app1ListenPort)
 
-	runFakeApp(backendPort2)
-	t.Logf("2nd backend is running on port %d", backendPort2)
+	runFakeApp(app2ListenPort)
+	t.Logf("2nd backend is running on port %d", app2ListenPort)
 
-	copilotAddr := fmt.Sprintf("127.0.0.1:%d", copilotPort)
-	testState := newTestState(copilotAddr)
-	defer testState.tearDown()
-	copilotTLSConfig := testState.creds.ServerTLSConfig()
-
-	quitCopilotServer := make(chan struct{})
-	testState.addCleanupTask(func() { close(quitCopilotServer) })
 	t.Log("starting mock copilot grpc server...")
-	mockCopilot, err := bootMockCopilotInBackground(copilotAddr, copilotTLSConfig, quitCopilotServer)
+	var err error
+	_, err = types.TimestampProto(time.Date(2018, time.January, 1, 12, 15, 30, 5e8, time.UTC))
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
-	mockCopilot.PopulateRoute(internalAppName, "127.0.0.1", backendPort)
-	mockCopilot.PopulateRoute(internalAppName2, "127.0.0.1", backendPort2)
+	copilotMCPServer, err := startMCPCopilot()
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	defer copilotMCPServer.Close()
 
-	err = testState.copilotConfig.Save(testState.copilotConfigFilePath)
-	g.Expect(err).To(gomega.BeNil())
+	sn := snapshot.NewInMemoryBuilder()
 
-	t.Log("saving istio config...")
-
-	for name, config := range map[string][]byte{
-		"gateway.yml":     []byte(gatewayConfig),
-		"route-rule.yml":  []byte(routeRule),
-		"route-rule2.yml": []byte(routeRule2)} {
-
-		err = ioutil.WriteFile(filepath.Join(testState.istioConfigDir, name), config, 0600)
-		g.Expect(err).NotTo(gomega.HaveOccurred())
+	for _, m := range model.IstioConfigTypes {
+		sn.SetVersion(m.Collection, "v0")
 	}
 
-	t.Log("building pilot...")
+	sn.SetEntry(model.Gateway.Collection, "cloudfoundry-ingress", "v1", fakeCreateTime2, nil, nil, gateway)
 
-	pilotSession, err := runPilot(testState.copilotConfigFilePath, testState.istioConfigDir, pilotPort)
-	g.Expect(err).NotTo(gomega.HaveOccurred())
+	sn.SetEntry(model.VirtualService.Collection, "vs-1", "v1", fakeCreateTime2, nil, nil,
+		virtualService(8060, "cloudfoundry-ingress", "/some/path", cfRouteOne, subsetOne))
+	sn.SetEntry(model.VirtualService.Collection, "vs-2", "v1", fakeCreateTime2, nil, nil,
+		virtualService(8070, "cloudfoundry-ingress", "", cfRouteTwo, subsetTwo))
 
-	testState.addCleanupTask(func() {
-		pilotSession.Terminate()
-		g.Eventually(pilotSession, "5s").Should(gexec.Exit())
-	})
+	sn.SetEntry(model.DestinationRule.Collection, "dr-1", "v1", fakeCreateTime2, nil, nil,
+		destinationRule(cfRouteOne, subsetOne))
+	sn.SetEntry(model.DestinationRule.Collection, "dr-2", "v1", fakeCreateTime2, nil, nil,
+		destinationRule(cfRouteTwo, subsetTwo))
 
-	t.Log("checking if pilot ready")
-	g.Eventually(pilotSession.Out, "10s").Should(gbytes.Say(`READY`))
+	sn.SetEntry(model.ServiceEntry.Collection, "se-1", "v1", fakeCreateTime2, nil, nil,
+		serviceEntry(8060, app1ListenPort, nil, cfRouteOne, subsetOne))
+	sn.SetEntry(model.ServiceEntry.Collection, "se-2", "v1", fakeCreateTime2, nil, nil,
+		serviceEntry(8070, app2ListenPort, nil, cfRouteTwo, subsetTwo))
+
+	copilotMCPServer.Cache.SetSnapshot(groups.Default, sn.Build())
+
+	server, tearDown := initLocalPilotTestEnv(t, copilotMCPServer.Port, pilotGrpcPort, pilotDebugPort)
+	defer tearDown()
+
+	// register a service for gateway
+	discovery := srmemory.NewDiscovery(
+		map[model.Hostname]*model.Service{
+			ingressGatewaySvc: gatewaySvc,
+		}, 1)
+
+	registry := aggregate.Registry{
+		Name:             serviceregistry.ServiceRegistry("mockCloudFoundryAdapter"),
+		ClusterID:        "mockCloudFoundryAdapter",
+		ServiceDiscovery: discovery,
+		Controller:       &mockController{},
+	}
+
+	server.ServiceController.AddRegistry(registry)
 
 	t.Log("checking if pilot received routes from copilot")
 	g.Eventually(func() (string, error) {
-		return curlPilot(pilotURL("/v1/registration"))
-	}).Should(gomega.ContainSubstring(internalAppName))
+		// this really should be json but the endpoint cannot
+		// be unmarshaled, json is invalid
+		pilotURL := pilotURL("/debug/endpointz")
+		return curlPilot(pilotURL)
+	}, "30s", "5s").Should(gomega.ContainSubstring(cfRouteOne))
 
-	t.Log("checking if pilot is creating the correct listeners")
+	t.Log("checking if pilot is creating the correct listener data")
 	g.Eventually(func() (string, error) {
-		return curlPilot(pilotURL("/v1/listeners/x/router~x~x~x"))
-	}).Should(gomega.ContainSubstring("http_connection_manager"))
+		return curlPilot(pilotURL("/debug/configz"))
+	}).Should(gomega.ContainSubstring("gateway"))
 
-	t.Log("run envoy...")
+	t.Log("run edge router envoy...")
+	gateway := runEnvoy(t, "router~"+gatewayInstance+"~x~x", pilotGrpcPort, pilotDebugPort)
+	defer gateway.TearDown()
 
-	err = testState.runEnvoy(fmt.Sprintf("127.0.0.1:%d", pilotPort))
+	t.Log("curling the app with expected host header")
+	g.Eventually(func() error {
+		hostRoute := url.URL{
+			Host: cfRouteOne,
+		}
+
+		endpoint := url.URL{
+			Scheme: "http",
+			Host:   fmt.Sprintf("127.0.0.1:%d", publicPort),
+			Path:   cfPath,
+		}
+
+		respData, err := curlApp(endpoint, hostRoute)
+		if err != nil {
+			return err
+		}
+
+		if !strings.Contains(respData, "hello") {
+			return fmt.Errorf("unexpected response data: %s", respData)
+		}
+
+		if !strings.Contains(respData, cfRouteOne) {
+			return fmt.Errorf("unexpected response data: %s", respData)
+		}
+		return nil
+	}, "300s", "1s").Should(gomega.Succeed())
+
+	g.Eventually(func() error {
+		hostRoute := url.URL{
+			Host: cfRouteTwo,
+		}
+
+		endpoint := url.URL{
+			Scheme: "http",
+			Host:   fmt.Sprintf("127.0.0.1:%d", publicPort),
+		}
+
+		respData, err := curlApp(endpoint, hostRoute)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(respData, "hello") {
+			return fmt.Errorf("unexpected response data: %s", respData)
+		}
+		if !strings.Contains(respData, cfRouteTwo) {
+			return fmt.Errorf("unexpected response data: %s", respData)
+		}
+		return nil
+	}, "300s", "1s").Should(gomega.Succeed())
+}
+
+func TestWildcardHostSidecarRouterWithMockCopilot(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	runFakeApp(app3ListenPort)
+	t.Logf("internal backend is running on port %d", app3ListenPort)
+
+	copilotMCPServer, err := startMCPCopilot()
 	g.Expect(err).NotTo(gomega.HaveOccurred())
+	defer copilotMCPServer.Close()
+
+	sn := snapshot.NewInMemoryBuilder()
+	for _, m := range model.IstioConfigTypes {
+		sn.SetVersion(m.Collection, "v0")
+	}
+	sn.SetEntry(model.ServiceEntry.Collection, "se-1", "v1", fakeCreateTime2, nil, nil,
+		serviceEntry(sidecarServicePort, app3ListenPort, []string{"127.1.1.1"}, cfInternalRoute, subsetOne))
+	copilotMCPServer.Cache.SetSnapshot(groups.Default, sn.Build())
+
+	_, tearDown := initLocalPilotTestEnv(t, copilotMCPServer.Port, pilotGrpcPort, pilotDebugPort)
+	defer tearDown()
+
+	g.Eventually(func() (string, error) {
+		// this really should be json but the endpoint cannot
+		// be unmarshaled, json is invalid
+		pilotURL := pilotURL("/debug/endpointz")
+		return curlPilot(pilotURL)
+	}, "30s", "5s").Should(gomega.ContainSubstring("127.0.0.1"))
+
+	sidecar := runEnvoy(t, "sidecar~127.1.1.1~x~x", pilotGrpcPort, pilotDebugPort)
+	defer sidecar.TearDown()
 
 	t.Log("curling the app with expected host header")
 
 	g.Eventually(func() error {
-		respData, err := curlApp(fmt.Sprintf("http://127.0.0.1:%d", publicPort), publicRouteName)
+		hostRoute := url.URL{
+			Host: cfInternalRoute,
+		}
+
+		endpoint := url.URL{
+			Scheme: "http",
+			Host:   fmt.Sprintf("127.1.1.1:%d", sidecarServicePort),
+		}
+
+		respData, err := curlApp(endpoint, hostRoute)
 		if err != nil {
 			return err
 		}
 		if !strings.Contains(respData, "hello") {
 			return fmt.Errorf("unexpected response data: %s", respData)
 		}
-		if !strings.Contains(respData, publicRouteName) {
-			return fmt.Errorf("unexpected response data: %s", respData)
-		}
-		return nil
-	}, "300s", "1s").Should(gomega.Succeed())
-
-	g.Eventually(func() error {
-		respData, err := curlApp(fmt.Sprintf("http://127.0.0.1:%d", publicPort), publicRouteName2)
-		if err != nil {
-			return err
-		}
-		if !strings.Contains(respData, "hello") {
-			return fmt.Errorf("unexpected response data: %s", respData)
-		}
-		if !strings.Contains(respData, publicRouteName2) {
+		if !strings.Contains(respData, cfInternalRoute) {
 			return fmt.Errorf("unexpected response data: %s", respData)
 		}
 		return nil
 	}, "300s", "1s").Should(gomega.Succeed())
 }
 
-type testState struct {
-	// generated credentials for copilot server and client
-	creds testhelpers.MTLSCredentials
-
-	// path on disk to store the copilot config.yaml
-	copilotConfigFilePath string
-
-	// path to directory holding istio config
-	istioConfigDir string
-
-	copilotConfig *cloudfoundry.Config
-
-	cleanupTasks []func()
-	mutex        sync.Mutex
-}
-
-func (testState *testState) addCleanupTask(task func()) {
-	testState.mutex.Lock()
-	defer testState.mutex.Unlock()
-	testState.cleanupTasks = append(testState.cleanupTasks, task)
-}
-
-func newTestState(mockCopilotServerAddress string) *testState {
-	creds := testhelpers.GenerateMTLS()
-	clientTLSFiles := creds.CreateClientTLSFiles()
-	return &testState{
-		creds: creds,
-		copilotConfigFilePath: filepath.Join(creds.TempDir, "config.yaml"),
-		istioConfigDir:        testhelpers.TempDir(),
-		copilotConfig: &cloudfoundry.Config{
-			Copilot: cloudfoundry.CopilotConfig{
-				ServerCACertPath: clientTLSFiles.ServerCA,
-				ClientCertPath:   clientTLSFiles.ClientCert,
-				ClientKeyPath:    clientTLSFiles.ClientKey,
-				Address:          mockCopilotServerAddress,
-				PollInterval:     10 * time.Second,
-			},
-			ServicePort: 8080, // does not matter right now, since CF only supports 1 port
-		},
-	}
-}
-
-func (testState *testState) runEnvoy(discoveryAddr string) error {
-	config := model.DefaultProxyConfig()
-	dir := os.Getenv("ISTIO_BIN")
-	if dir == "" {
-		dir = os.Getenv("ISTIO_OUT")
-	}
-	if dir == "" {
-		return fmt.Errorf("envoy bin dir empty, set either ISTIO_BIN or ISTIO_OUT")
+func startMCPCopilot() (*mcptesting.Server, error) {
+	collections := make([]string, len(model.IstioConfigTypes))
+	for i, m := range model.IstioConfigTypes {
+		collections[i] = m.Collection
 	}
 
-	config.BinaryPath = path.Join(dir, "envoy")
-
-	config.ConfigPath = "tmp"
-	config.DiscoveryAddress = discoveryAddr
-	config.ServiceCluster = "x"
-
-	envoyConfig := envoy.BuildConfig(config, nil)
-	envoyProxy := envoy.NewProxy(config, "router~x~x~x", string(log.ErrorLevel))
-	abortCh := make(chan error, 1)
-
-	cleanupSignal := errors.New("test cleanup")
-	testState.addCleanupTask(func() {
-		abortCh <- cleanupSignal
-		os.RemoveAll(config.ConfigPath) // nolint: errcheck
-	})
-
-	go func() {
-		err := envoyProxy.Run(envoyConfig, 0, abortCh)
-		if err != nil && err != cleanupSignal {
-			panic(fmt.Sprintf("running envoy: %s", err))
-		}
-	}()
-
-	return nil
-}
-
-func (testState *testState) tearDown() {
-	for i := len(testState.cleanupTasks) - 1; i >= 0; i-- {
-		testState.cleanupTasks[i]()
-	}
-}
-
-func bootMockCopilotInBackground(listenAddress string, tlsConfig *tls.Config, quit <-chan struct{}) (*mock.CopilotHandler, error) {
-	handler := &mock.CopilotHandler{
-		RoutesResponseData: make(map[string]*api.BackendSet),
-	}
-	l, err := tls.Listen("tcp", listenAddress, tlsConfig)
+	server, err := mcptesting.NewServer(0, source.CollectionOptionsFromSlice(collections))
 	if err != nil {
 		return nil, err
 	}
-	grpcServer := grpc.NewServer()
-	api.RegisterIstioCopilotServer(grpcServer, handler)
-	errChan := make(chan error)
-	go func() {
-		errChan <- grpcServer.Serve(l)
-	}()
-	go func() {
-		select {
-		case e := <-errChan:
-			fmt.Printf("grpc server errored: %s", e)
-			return
-		case <-quit:
-			grpcServer.Stop()
-			return
-		}
-	}()
-	return handler, nil
+
+	return server, nil
 }
 
 func runFakeApp(port int) {
@@ -331,20 +299,63 @@ func runFakeApp(port int) {
 	go http.ListenAndServe(fmt.Sprintf(":%d", port), fakeAppHandler) // nolint: errcheck
 }
 
-func runPilot(copilotConfigFile, istioConfigDir string, port int) (*gexec.Session, error) {
-	path, err := gexec.Build("istio.io/istio/pilot/cmd/pilot-discovery")
+func addMcpAddrs(mcpServerPort int) func(*bootstrap.PilotArgs) {
+	return func(arg *bootstrap.PilotArgs) {
+		if arg.MeshConfig == nil {
+			arg.MeshConfig = &meshconfig.MeshConfig{}
+		}
+		arg.MeshConfig.ConfigSources = []*meshconfig.ConfigSource{
+			{Address: fmt.Sprintf("127.0.0.1:%d", mcpServerPort)},
+		}
+	}
+}
+
+func setupPilotDiscoveryHTTPAddr(http string) func(*bootstrap.PilotArgs) {
+	return func(arg *bootstrap.PilotArgs) {
+		arg.DiscoveryOptions.HTTPAddr = http
+	}
+}
+
+func setupPilotDiscoveryGrpcAddr(grpc string) func(*bootstrap.PilotArgs) {
+	return func(arg *bootstrap.PilotArgs) {
+		arg.DiscoveryOptions.GrpcAddr = grpc
+	}
+}
+
+func initLocalPilotTestEnv(t *testing.T, mcpPort, grpcPort, debugPort int) (*bootstrap.Server, util.TearDownFunc) {
+	mixerEnv.NewTestSetup(mixerEnv.PilotMCPTest, t)
+	debugAddr := fmt.Sprintf("127.0.0.1:%d", debugPort)
+	grpcAddr := fmt.Sprintf("127.0.0.1:%d", grpcPort)
+	return util.EnsureTestServer(addMcpAddrs(mcpPort), setupPilotDiscoveryHTTPAddr(debugAddr), setupPilotDiscoveryGrpcAddr(grpcAddr))
+}
+
+func runEnvoy(t *testing.T, nodeID string, grpcPort, debugPort uint16) *mixerEnv.TestSetup {
+	t.Log("create a new envoy test environment")
+	tmpl, err := ioutil.ReadFile(env.IstioSrc + "/tests/testdata/cf_bootstrap_tmpl.json")
 	if err != nil {
-		return nil, err
+		t.Fatal("Can't read bootstrap template", err)
 	}
 
-	pilotCmd := exec.Command(path, "discovery",
-		"--configDir", istioConfigDir,
-		"--registries", "CloudFoundry",
-		"--cfConfig", copilotConfigFile,
-		"--meshConfig", "/dev/null",
-		"--port", fmt.Sprintf("%d", port),
-	)
-	return gexec.Start(pilotCmd, nil, nil) // change these to os.Stdout when debugging
+	gateway := mixerEnv.NewTestSetup(25, t)
+	gateway.SetNoMixer(true)
+	gateway.SetNoProxy(true)
+	gateway.SetNoBackend(true)
+	gateway.IstioSrc = env.IstioSrc
+	gateway.IstioOut = env.IstioOut
+	gateway.Ports().PilotGrpcPort = grpcPort
+	gateway.Ports().PilotHTTPPort = debugPort
+	gateway.EnvoyConfigOpt = map[string]interface{}{
+		"NodeID": nodeID,
+	}
+	gateway.EnvoyTemplate = string(tmpl)
+	gateway.EnvoyParams = []string{
+		"--service-node", nodeID,
+		"--service-cluster", "x",
+	}
+	if err := gateway.SetUp(); err != nil {
+		t.Fatalf("Failed to setup test: %v", err)
+	}
+	return gateway
 }
 
 func curlPilot(apiEndpoint string) (string, error) {
@@ -359,12 +370,13 @@ func curlPilot(apiEndpoint string) (string, error) {
 	return string(respBytes), nil
 }
 
-func curlApp(endpoint, hostHeader string) (string, error) {
-	req, err := http.NewRequest("GET", endpoint, nil)
+func curlApp(endpoint, hostRoute url.URL) (string, error) {
+	req, err := http.NewRequest("GET", endpoint.String(), nil)
 	if err != nil {
 		return "", err
 	}
-	req.Host = hostHeader
+
+	req.Host = hostRoute.Host
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
@@ -377,4 +389,88 @@ func curlApp(endpoint, hostHeader string) (string, error) {
 		return "", err
 	}
 	return string(respBytes), nil
+}
+
+var gateway = &networking.Gateway{
+	Servers: []*networking.Server{
+		{
+			Port: &networking.Port{
+				Name:     "http",
+				Number:   publicPort,
+				Protocol: "http",
+			},
+			Hosts: []string{
+				"*.example.com",
+			},
+		},
+	},
+}
+
+func virtualService(portNum uint32, gatewayName, path, host, subset string) *networking.VirtualService {
+	vs := &networking.VirtualService{
+		Gateways: []string{gatewayName},
+		Http: []*networking.HTTPRoute{
+			{
+				Route: []*networking.HTTPRouteDestination{
+					{
+						Destination: &networking.Destination{
+							Host:   host,
+							Subset: subset,
+							Port: &networking.PortSelector{
+								Port: &networking.PortSelector_Number{Number: portNum},
+							},
+						},
+					},
+				},
+			},
+		},
+		Hosts: []string{host},
+	}
+	if path != "" {
+		vs.Http[0].Match = []*networking.HTTPMatchRequest{
+			{
+				Uri: &networking.StringMatch{
+					MatchType: &networking.StringMatch_Prefix{Prefix: path},
+				},
+			},
+		}
+	}
+	return vs
+}
+
+func destinationRule(host, subset string) *networking.DestinationRule {
+	return &networking.DestinationRule{
+		Host: host,
+		Subsets: []*networking.Subset{
+			{
+				Name:   subset,
+				Labels: map[string]string{"cfapp": subset},
+			},
+		},
+	}
+}
+
+func serviceEntry(servicePort, backendPort uint32, vips []string, host, subset string) *networking.ServiceEntry {
+	return &networking.ServiceEntry{
+		Hosts:     []string{host},
+		Addresses: vips,
+		Ports: []*networking.Port{
+			{
+				Name:     "http",
+				Number:   servicePort,
+				Protocol: "http",
+			},
+		},
+		Location:   networking.ServiceEntry_MESH_INTERNAL,
+		Resolution: networking.ServiceEntry_STATIC,
+		Endpoints: []*networking.ServiceEntry_Endpoint{
+			{
+				Address: "127.0.0.1",
+				Ports: map[string]uint32{
+					"http": backendPort,
+				},
+				Labels: map[string]string{"cfapp": subset},
+			},
+		},
+	}
 }

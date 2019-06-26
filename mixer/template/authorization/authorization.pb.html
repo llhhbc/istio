@@ -1,12 +1,39 @@
 ---
 title: Authorization
-overview: A template used to represent an access control query.
-location: https://istio.io/docs/reference/config/template/authorization.html
+description: A template used to represent an access control query.
+location: https://istio.io/docs/reference/config/policy-and-telemetry/templates/authorization.html
 layout: protoc-gen-docs
+generator: protoc-gen-docs
+aliases:
+  - /docs/reference/config/template/authorization.html
 number_of_entries: 3
 ---
 <p>The <code>authorization</code> template defines parameters for performing policy
 enforcement within Istio. It is primarily concerned with enabling Mixer</p>
+
+<p>Example config:</p>
+
+<pre><code class="language-yaml">apiVersion: &quot;config.istio.io/v1alpha2&quot;
+kind: instance
+metadata:
+  name: authinfo
+  namespace: istio-system
+spec:
+  compiledTemplate: authorization
+  params:
+    subject:
+      user: source.principal | request.auth.principal | &quot;&quot;
+      groups: request.auth.claims[&quot;groups&quot;] | &quot;&quot;
+      properties:
+        iss: request.auth.claims[&quot;iss&quot;]
+    action:
+      namespace: destination.namespace | &quot;default&quot;
+      service: destination.service.host | &quot;&quot;
+      path: request.path | &quot;/&quot;
+      method: request.method | &quot;post&quot;
+      properties:
+        version: destination.labels[version] | &quot;&quot;
+</code></pre>
 
 <h2 id="Action">Action</h2>
 <section>
@@ -21,7 +48,7 @@ enforcement within Istio. It is primarily concerned with enabling Mixer</p>
 </tr>
 </thead>
 <tbody>
-<tr id="Action.namespace">
+<tr id="Action-namespace">
 <td><code>namespace</code></td>
 <td><code>string</code></td>
 <td>
@@ -29,7 +56,7 @@ enforcement within Istio. It is primarily concerned with enabling Mixer</p>
 
 </td>
 </tr>
-<tr id="Action.service">
+<tr id="Action-service">
 <td><code>service</code></td>
 <td><code>string</code></td>
 <td>
@@ -37,7 +64,7 @@ enforcement within Istio. It is primarily concerned with enabling Mixer</p>
 
 </td>
 </tr>
-<tr id="Action.method">
+<tr id="Action-method">
 <td><code>method</code></td>
 <td><code>string</code></td>
 <td>
@@ -45,7 +72,7 @@ enforcement within Istio. It is primarily concerned with enabling Mixer</p>
 
 </td>
 </tr>
-<tr id="Action.path">
+<tr id="Action-path">
 <td><code>path</code></td>
 <td><code>string</code></td>
 <td>
@@ -53,9 +80,9 @@ enforcement within Istio. It is primarily concerned with enabling Mixer</p>
 
 </td>
 </tr>
-<tr id="Action.properties">
+<tr id="Action-properties">
 <td><code>properties</code></td>
-<td><code>map&lt;string,&nbsp;<a href="https://istio.io/docs/reference/config/mixer/istio.mixer.adapter.model.v1beta1.html#Value">istio.mixer.adapter.model.v1beta1.Value</a>&gt;</code></td>
+<td><code>map&lt;string,&nbsp;<a href="https://istio.io/docs/reference/config/policy-and-telemetry/istio.policy.v1beta1.html#Value">istio.policy.v1beta1.Value</a>&gt;</code></td>
 <td>
 <p>Additional data about the action for use in policy.</p>
 
@@ -78,7 +105,7 @@ the caller identity.</p>
 </tr>
 </thead>
 <tbody>
-<tr id="Subject.user">
+<tr id="Subject-user">
 <td><code>user</code></td>
 <td><code>string</code></td>
 <td>
@@ -86,7 +113,7 @@ the caller identity.</p>
 
 </td>
 </tr>
-<tr id="Subject.groups">
+<tr id="Subject-groups">
 <td><code>groups</code></td>
 <td><code>string</code></td>
 <td>
@@ -97,9 +124,9 @@ the template.</p>
 
 </td>
 </tr>
-<tr id="Subject.properties">
+<tr id="Subject-properties">
 <td><code>properties</code></td>
-<td><code>map&lt;string,&nbsp;<a href="https://istio.io/docs/reference/config/mixer/istio.mixer.adapter.model.v1beta1.html#Value">istio.mixer.adapter.model.v1beta1.Value</a>&gt;</code></td>
+<td><code>map&lt;string,&nbsp;<a href="https://istio.io/docs/reference/config/policy-and-telemetry/istio.policy.v1beta1.html#Value">istio.policy.v1beta1.Value</a>&gt;</code></td>
 <td>
 <p>Additional attributes about the subject.</p>
 
@@ -118,28 +145,6 @@ defined in an Action message. During a Mixer Check call, these values
 will be populated based on configuration from request attributes and
 passed to individual authorization adapters to adjudicate.</p>
 
-<p>Example config:</p>
-
-<pre><code class="language-yaml">apiVersion: &quot;config.istio.io/v1alpha2&quot;
-kind: authorization
-metadata:
-  name: authinfo
-  namespace: istio-system
-spec:
- subject:
-   user: source.user | request.auth.token[user] | &quot;&quot;
-   groups: request.auth.token[groups]
-   properties:
-    iss: request.auth.token[&quot;iss&quot;]
- action:
-   namespace: target.namespace | &quot;default&quot;
-   service: target.service | &quot;&quot;
-   path: request.path | &quot;/&quot;
-   method: request.method | &quot;post&quot;
-   properties:
-     version: destination.labels[version] | &quot;&quot;
-</code></pre>
-
 <table class="message-fields">
 <thead>
 <tr>
@@ -149,7 +154,7 @@ spec:
 </tr>
 </thead>
 <tbody>
-<tr id="Template.subject">
+<tr id="Template-subject">
 <td><code>subject</code></td>
 <td><code><a href="#Subject">Subject</a></code></td>
 <td>
@@ -158,7 +163,7 @@ the caller identity.</p>
 
 </td>
 </tr>
-<tr id="Template.action">
+<tr id="Template-action">
 <td><code>action</code></td>
 <td><code><a href="#Action">Action</a></code></td>
 <td>

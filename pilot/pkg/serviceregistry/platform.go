@@ -18,12 +18,12 @@ package serviceregistry
 type ServiceRegistry string
 
 const (
-	// KubernetesRegistry environment flag
+	// MockRegistry is a service registry that contains 2 hard-coded test services
+	MockRegistry ServiceRegistry = "Mock"
+	// KubernetesRegistry is a service registry backed by k8s API server
 	KubernetesRegistry ServiceRegistry = "Kubernetes"
-	// ConsulRegistry environment flag
+	// ConsulRegistry is a service registry backed by Consul
 	ConsulRegistry ServiceRegistry = "Consul"
-	// EurekaRegistry environment flag
-	EurekaRegistry ServiceRegistry = "Eureka"
-	// CloudFoundryRegistry environment flag
-	CloudFoundryRegistry ServiceRegistry = "CloudFoundry"
+	// MCPRegistry is a service registry backed by MCP ServiceEntries
+	MCPRegistry ServiceRegistry = "MCP"
 )

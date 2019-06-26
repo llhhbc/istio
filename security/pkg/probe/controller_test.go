@@ -19,35 +19,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gogo/googleapis/google/rpc"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/balancer"
 
-	rpc "istio.io/gogo-genproto/googleapis/google/rpc"
-	"istio.io/istio/pkg/probe"
-	caclient "istio.io/istio/security/pkg/caclient/grpc"
+	"istio.io/istio/security/pkg/caclient/protocol"
+	"istio.io/istio/security/pkg/caclient/protocol/mock"
 	"istio.io/istio/security/pkg/pki/ca"
 	"istio.io/istio/security/pkg/pki/util"
-	"istio.io/istio/security/pkg/platform"
 	pb "istio.io/istio/security/proto"
+	"istio.io/pkg/probe"
 )
-
-type FakeCAGrpcClientImpl struct {
-	resp *pb.CsrResponse
-	err  error
-}
-
-func (c *FakeCAGrpcClientImpl) SetResponse(resp *pb.CsrResponse, err error) {
-	c.resp = resp
-	c.err = err
-}
-
-// SendCSR
-func (c *FakeCAGrpcClientImpl) SendCSR(req *pb.CsrRequest, pc platform.Client, caAddress string) (*pb.CsrResponse, error) {
-	return c.resp, c.err
-}
 
 func TestGcpGetServiceIdentity(t *testing.T) {
 	bundle, err := util.NewVerifiedKeyCertBundleFromFile(
-		"./testdata/ca.crt", "./testdata/ca.key", "", "./testdata/root.crt")
+		"../pki/testdata/multilevelpki/int-cert.pem", "../pki/testdata/multilevelpki/int-key.pem",
+		"", "../pki/testdata/multilevelpki/root-cert.pem")
 	if err != nil {
 		t.Error(err)
 	}
@@ -62,60 +49,49 @@ func TestGcpGetServiceIdentity(t *testing.T) {
 
 	testCases := map[string]struct {
 		resp     *pb.CsrResponse
-		err      error
+		err      string
 		expected string
 	}{
-		"Check success": {
+		// TODO: test successful case.
+		"Returned no cert": {
 			resp: &pb.CsrResponse{
 				IsApproved: true,
 				Status:     &rpc.Status{Code: int32(rpc.OK), Message: "OK"},
 				SignedCert: nil,
 				CertChain:  nil,
 			},
-			err:      nil,
-			expected: "",
+			expected: "CSR sign failure: failed to parse cert PEM: invalid PEM encoded certificate",
 		},
 		"SendCSR failed": {
 			resp:     nil,
-			err:      fmt.Errorf("sendCSR failed"),
+			err:      "sendCSR failed",
 			expected: "sendCSR failed",
 		},
 		"gRPC server is not available": {
 			resp:     nil,
-			err:      fmt.Errorf("%v", balancer.ErrTransientFailure.Error()),
-			expected: "",
+			err:      fmt.Sprintf("%v", balancer.ErrTransientFailure.Error()),
+			expected: "all SubConns are in TransientFailure",
 		},
 	}
 
 	for id, c := range testCases {
-		// override mock client
-		mockClient := FakeCAGrpcClientImpl{
-			resp: c.resp,
-			err:  c.err,
+		fakeProvider := func(_ string, _ []grpc.DialOption) (protocol.CAProtocol, error) {
+			return mock.NewFakeProtocol(c.resp, c.err), nil
 		}
-
-		var g interface{} = &mockClient
-		client, ok := g.(caclient.CAGrpcClient)
-		if !ok {
-			t.Fatalf("%v: Failed to create a client", id)
-		}
-
 		// test liveness probe check controller
 		controller, err := NewLivenessCheckController(
 			time.Minute,
-			"localhost",
-			1234,
+			"",
 			istioCA,
 			&probe.Options{
 				Path:           "/tmp/test.key",
 				UpdateInterval: time.Minute,
 			},
-			client,
+			fakeProvider,
 		)
 		if err != nil {
 			t.Errorf("%v: Expecting an error but an Istio CA is wrongly instantiated", id)
 		}
-
 		err = controller.checkGrpcServer()
 		if len(c.expected) == 0 {
 			if err != nil {

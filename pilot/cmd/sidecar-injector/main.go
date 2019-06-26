@@ -15,21 +15,32 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"time"
 
 	multierror "github.com/hashicorp/go-multierror"
+	"github.com/howeyc/fsnotify"
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
+	"k8s.io/api/admissionregistration/v1beta1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/kubernetes"
+	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
+	"k8s.io/client-go/tools/cache"
 
-	"istio.io/istio/pilot/cmd"
 	"istio.io/istio/pilot/pkg/kube/inject"
-	"istio.io/istio/pkg/collateral"
-	"istio.io/istio/pkg/log"
-	"istio.io/istio/pkg/probe"
-	"istio.io/istio/pkg/version"
+	"istio.io/istio/pkg/cmd"
+	"istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/util"
+	"istio.io/pkg/collateral"
+	"istio.io/pkg/log"
+	"istio.io/pkg/probe"
+	"istio.io/pkg/version"
 )
 
 var (
@@ -38,20 +49,28 @@ var (
 
 		meshconfig          string
 		injectConfigFile    string
+		injectValuesFile    string
 		certFile            string
 		privateKeyFile      string
+		caCertFile          string
 		port                int
 		healthCheckInterval time.Duration
 		healthCheckFile     string
 		probeOptions        probe.Options
+		kubeconfigFile      string
+		webhookConfigName   string
+		webhookName         string
 	}{
 		loggingOptions: log.DefaultOptions(),
 	}
 
 	rootCmd = &cobra.Command{
-		Use:   "sidecar-injector",
-		Short: "Kubernetes webhook for automatic Istio sidecar injection",
-		RunE: func(*cobra.Command, []string) error {
+		Use:          "sidecar-injector",
+		Short:        "Kubernetes webhook for automatic Istio sidecar injection.",
+		SilenceUsage: true,
+		Args:         cobra.ExactArgs(0),
+		RunE: func(c *cobra.Command, _ []string) error {
+			cmd.PrintFlags(c.Flags())
 			if err := log.Configure(flags.loggingOptions); err != nil {
 				return err
 			}
@@ -60,6 +79,7 @@ var (
 
 			parameters := inject.WebhookParameters{
 				ConfigFile:          flags.injectConfigFile,
+				ValuesFile:          flags.injectValuesFile,
 				MeshFile:            flags.meshconfig,
 				CertFile:            flags.certFile,
 				KeyFile:             flags.privateKeyFile,
@@ -73,6 +93,10 @@ var (
 			}
 
 			stop := make(chan struct{})
+			if err := patchCertLoop(stop); err != nil {
+				return multierror.Prefix(err, "failed to start patch cert loop")
+			}
+
 			go wh.Run(stop)
 			cmd.WaitSignal(stop)
 			return nil
@@ -82,6 +106,7 @@ var (
 	probeCmd = &cobra.Command{
 		Use:   "probe",
 		Short: "Check the liveness or readiness of a locally-running server",
+		Args:  cobra.ExactArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !flags.probeOptions.IsValid() {
 				return errors.New("some options are not valid")
@@ -95,22 +120,111 @@ var (
 	}
 )
 
+func patchCertLoop(stopCh <-chan struct{}) error {
+	client, err := kube.CreateClientset(flags.kubeconfigFile, "")
+	if err != nil {
+		return err
+	}
+
+	caCertPem, err := ioutil.ReadFile(flags.caCertFile)
+	if err != nil {
+		return err
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	watchDir, _ := filepath.Split(flags.caCertFile)
+	if err = watcher.Watch(watchDir); err != nil {
+		return fmt.Errorf("could not watch %v: %v", flags.caCertFile, err)
+	}
+
+	if err = util.PatchMutatingWebhookConfig(client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations(),
+		flags.webhookConfigName, flags.webhookName, caCertPem); err != nil {
+		return err
+	}
+
+	shouldPatch := make(chan struct{})
+
+	watchlist := cache.NewListWatchFromClient(
+		client.AdmissionregistrationV1beta1().RESTClient(),
+		"mutatingwebhookconfigurations",
+		"",
+		fields.ParseSelectorOrDie(fmt.Sprintf("metadata.name=%s", flags.webhookConfigName)))
+
+	_, controller := cache.NewInformer(
+		watchlist,
+		&v1beta1.MutatingWebhookConfiguration{},
+		0,
+		cache.ResourceEventHandlerFuncs{
+			UpdateFunc: func(oldObj, newObj interface{}) {
+				config := newObj.(*v1beta1.MutatingWebhookConfiguration)
+				for i, w := range config.Webhooks {
+					if w.Name == flags.webhookName && !bytes.Equal(config.Webhooks[i].ClientConfig.CABundle, caCertPem) {
+						log.Infof("Detected a change in CABundle, patching MutatingWebhookConfiguration again")
+						shouldPatch <- struct{}{}
+						break
+					}
+				}
+			},
+		},
+	)
+	go controller.Run(stopCh)
+
+	go func() {
+		for {
+			select {
+			case <-shouldPatch:
+				doPatch(client, caCertPem)
+
+			case <-watcher.Event:
+				if b, err := ioutil.ReadFile(flags.caCertFile); err == nil {
+					log.Infof("Detected a change in CABundle (via secret), patching MutatingWebhookConfiguration again")
+					caCertPem = b
+					doPatch(client, caCertPem)
+				} else {
+					log.Errorf("CA bundle file read error: %v", err)
+				}
+			}
+		}
+	}()
+
+	return nil
+}
+
+func doPatch(client *kubernetes.Clientset, caCertPem []byte) {
+	if err := util.PatchMutatingWebhookConfig(client.AdmissionregistrationV1beta1().MutatingWebhookConfigurations(),
+		flags.webhookConfigName, flags.webhookName, caCertPem); err != nil {
+		log.Errorf("Patch webhook failed: %v", err)
+	}
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flags.meshconfig, "meshConfig", "/etc/istio/config/mesh",
 		"File containing the Istio mesh configuration")
 	rootCmd.PersistentFlags().StringVar(&flags.injectConfigFile, "injectConfig", "/etc/istio/inject/config",
 		"File containing the Istio sidecar injection configuration and template")
-	rootCmd.PersistentFlags().StringVar(&flags.certFile, "tlsCertFile", "/etc/istio/certs/cert.pem",
+	rootCmd.PersistentFlags().StringVar(&flags.injectValuesFile, "injectValues", "/etc/istio/inject/values",
+		"File containing the Istio sidecar injection values, in yaml format")
+	rootCmd.PersistentFlags().StringVar(&flags.certFile, "tlsCertFile", "/etc/istio/certs/cert-chain.pem",
 		"File containing the x509 Certificate for HTTPS.")
 	rootCmd.PersistentFlags().StringVar(&flags.privateKeyFile, "tlsKeyFile", "/etc/istio/certs/key.pem",
 		"File containing the x509 private key matching --tlsCertFile.")
+	rootCmd.PersistentFlags().StringVar(&flags.caCertFile, "caCertFile", "/etc/istio/certs/root-cert.pem",
+		"File containing the x509 Certificate for HTTPS.")
 	rootCmd.PersistentFlags().IntVar(&flags.port, "port", 443, "Webhook port")
 
 	rootCmd.PersistentFlags().DurationVar(&flags.healthCheckInterval, "healthCheckInterval", 0,
-		"Configure how frequently the health check file specified by --healhCheckFile should be updated")
+		"Configure how frequently the health check file specified by --healthCheckFile should be updated")
 	rootCmd.PersistentFlags().StringVar(&flags.healthCheckFile, "healthCheckFile", "",
 		"File that should be periodically updated if health checking is enabled")
-
+	rootCmd.PersistentFlags().StringVar(&flags.kubeconfigFile, "kubeconfig", "",
+		"Specifies path to kubeconfig file. This must be specified when not running inside a Kubernetes pod.")
+	rootCmd.PersistentFlags().StringVar(&flags.webhookConfigName, "webhookConfigName", "istio-sidecar-injector",
+		"Name of the mutatingwebhookconfiguration resource in Kubernetes.")
+	rootCmd.PersistentFlags().StringVar(&flags.webhookName, "webhookName", "sidecar-injector.istio.io",
+		"Name of the webhook entry in the webhook config.")
 	// Attach the Istio logging options to the command.
 	flags.loggingOptions.AttachCobraFlags(rootCmd)
 

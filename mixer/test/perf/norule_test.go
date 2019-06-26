@@ -29,41 +29,33 @@ import (
 var baseNoRuleReportSetup = perf.Setup{
 	Config: perf.Config{
 		// Global setup is empty
-		Global:                  ``,
-		Service:                 minimalServiceConfig,
-		IdentityAttribute:       "destination.service",
-		IdentityAttributeDomain: "svc.cluster.local",
-		SingleThreaded:          true,
+		Global:         ``,
+		Service:        minimalServiceConfig,
+		SingleThreaded: true,
 	},
 
-	Load: perf.Load{
+	Loads: []perf.Load{{
 		Multiplier: 1,
 		Requests: []perf.Request{
-			perf.BasicReport{
-				Attributes: map[string]interface{}{},
-			},
+			perf.BuildBasicReport(map[string]interface{}{}),
 		},
-	},
+	}},
 }
 
 var baseNoRuleCheckSetup = perf.Setup{
 	Config: perf.Config{
 		// Global setup is empty
-		Global:                  ``,
-		Service:                 minimalServiceConfig,
-		IdentityAttribute:       "destination.service",
-		IdentityAttributeDomain: "svc.cluster.local",
-		SingleThreaded:          true,
+		Global:         ``,
+		Service:        minimalServiceConfig,
+		SingleThreaded: true,
 	},
 
-	Load: perf.Load{
+	Loads: []perf.Load{{
 		Multiplier: 1,
 		Requests: []perf.Request{
-			perf.BasicCheck{
-				Attributes: map[string]interface{}{},
-			},
+			perf.BuildBasicCheck(map[string]interface{}{}, nil),
 		},
-	},
+	}},
 }
 
 func Benchmark_NoRule_Report(b *testing.B) {
@@ -75,12 +67,11 @@ func Benchmark_NoRule_Report(b *testing.B) {
 	perf.Run(b, &setup, settings)
 }
 
-func Benchmark_NoRule_Report_R2(b *testing.B) {
+func Benchmark_NoRule_Report_Rpc(b *testing.B) {
 	settings := baseSettings
-	settings.RunMode = perf.InProcessBypassGrpc
+	settings.RunMode = perf.InProcess
 
 	setup := baseNoRuleReportSetup
-	setup.Config.UseRuntime2 = true
 
 	perf.Run(b, &setup, settings)
 }
@@ -94,12 +85,11 @@ func Benchmark_NoRule_Check(b *testing.B) {
 	perf.Run(b, &setup, settings)
 }
 
-func Benchmark_NoRule_Check_R2(b *testing.B) {
+func Benchmark_NoRule_Check_Rpc(b *testing.B) {
 	settings := baseSettings
-	settings.RunMode = perf.InProcessBypassGrpc
+	settings.RunMode = perf.InProcess
 
 	setup := baseNoRuleCheckSetup
-	setup.Config.UseRuntime2 = true
 
 	perf.Run(b, &setup, settings)
 }

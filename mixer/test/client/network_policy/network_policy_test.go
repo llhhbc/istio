@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors. All Rights Reserved.
+// Copyright 2017 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package networkPolicy
+package client_test
 
 import (
 	"fmt"
@@ -43,10 +43,11 @@ func TestNetworkFailure(t *testing.T) {
 	}
 
 	// Set to fail_close
-	env.SetNetworPolicy(s.V2().HTTPServerConf, false)
+	env.SetNetworPolicy(s.MfConfig().HTTPServerConf, false)
 	s.ReStartEnvoy()
 
 	tag = "Fail-Close"
+	url = fmt.Sprintf("http://localhost:%d/echo", s.Ports().ServerProxyPort)
 	// Use fail close policy.
 	code, _, err = env.HTTPGet(url)
 	if err != nil {

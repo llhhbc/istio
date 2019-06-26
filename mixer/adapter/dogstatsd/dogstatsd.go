@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:generate $GOPATH/src/istio.io/istio/bin/mixer_codegen.sh -f mixer/adapter/dogstatsd/config/config.proto
+// nolint: lll
+//go:generate $GOPATH/src/istio.io/istio/bin/mixer_codegen.sh -a mixer/adapter/dogstatsd/config/config.proto -x "-n dogstatsd -t metric"
 
 package dogstatsd
 
@@ -28,6 +29,7 @@ import (
 
 	descriptor "istio.io/api/policy/v1beta1"
 	"istio.io/istio/mixer/adapter/dogstatsd/config"
+	"istio.io/istio/mixer/adapter/metadata"
 	"istio.io/istio/mixer/pkg/adapter"
 	"istio.io/istio/mixer/template/metric"
 )
@@ -58,7 +60,12 @@ func (b *builder) Build(_ context.Context, env adapter.Env) (adapter.Handler, er
 	if err != nil {
 		return nil, env.Logger().Errorf("Unable to create dogstatsd client: %v", err)
 	}
-	client.Namespace = ac.Prefix
+
+	if !strings.HasSuffix(ac.Prefix, ".") {
+		client.Namespace = ac.Prefix + "."
+	} else {
+		client.Namespace = ac.Prefix
+	}
 	client.Tags = flattenTags(ac.GlobalTags)
 
 	// Create an empty map if tags aren't provided
@@ -195,18 +202,7 @@ func (h *handler) Close() error { return h.client.Close() }
 
 // GetInfo returns the adapter.Info specific to this adapter.
 func GetInfo() adapter.Info {
-	return adapter.Info{
-		Name:        "dogstatsd",
-		Description: "Produces dogstatsd metrics",
-		SupportedTemplates: []string{
-			metric.TemplateName,
-		},
-		NewBuilder: func() adapter.HandlerBuilder { return &builder{} },
-		DefaultConfig: &config.Params{
-			Address:      "localhost:8125",
-			Prefix:       "",
-			BufferLength: 0,
-			GlobalTags:   map[string]string{},
-		},
-	}
+	info := metadata.GetInfo("dogstatsd")
+	info.NewBuilder = func() adapter.HandlerBuilder { return &builder{} }
+	return info
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors. All Rights Reserved.
+// Copyright 2018 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package tcpFilterPeriodicalReport
+package client_test
 
 import (
 	"fmt"
@@ -22,64 +22,121 @@ import (
 )
 
 // Report attributes from a good POST request
-const deltaReportAttributesOkPost = `
+const openReportAttributesOkPost = `
 {
   "context.protocol": "tcp",
   "context.time": "*",
+  "context.reporter.uid": "",
   "mesh1.ip": "[1 1 1 1]",
   "source.ip": "[127 0 0 1]",
-  "source.port": "*",
   "target.uid": "POD222",
   "target.namespace": "XYZ222",
   "destination.ip": "[127 0 0 1]",
   "destination.port": "*",
+  "destination.uid": "",
+  "destination.namespace": "",
   "connection.mtls": false,
+  "origin.ip": "[127 0 0 1]",
+  "check.cache_hit": false,
+  "quota.cache_hit": false,
   "connection.received.bytes": 191,
   "connection.received.bytes_total": 191,
   "connection.sent.bytes": 0,
   "connection.sent.bytes_total": 0,
-  "connection.id": "*"
+  "connection.id": "*",
+  "connection.event": "open"
+}
+`
+const deltaReportAttributesOkPost = `
+{
+  "context.protocol": "tcp",
+  "context.time": "*",
+  "context.reporter.uid": "",
+  "mesh1.ip": "[1 1 1 1]",
+  "source.ip": "[127 0 0 1]",
+  "target.uid": "POD222",
+  "target.namespace": "XYZ222",
+  "destination.ip": "[127 0 0 1]",
+  "destination.port": "*",
+  "destination.uid": "",
+  "destination.namespace": "",
+  "connection.mtls": false,
+  "origin.ip": "[127 0 0 1]",
+  "check.cache_hit": false,
+  "quota.cache_hit": false,
+  "connection.received.bytes": 191,
+  "connection.received.bytes_total": 191,
+  "connection.sent.bytes": 0,
+  "connection.sent.bytes_total": 0,
+  "connection.id": "*",
+  "connection.event": "continue"
 }
 `
 const finalReportAttributesOkPost = `
 {
   "context.protocol": "tcp",
   "context.time": "*",
+  "context.reporter.uid": "",
   "mesh1.ip": "[1 1 1 1]",
   "source.ip": "[127 0 0 1]",
-  "source.port": "*",
   "target.uid": "POD222",
   "target.namespace": "XYZ222",
   "destination.ip": "[127 0 0 1]",
   "destination.port": "*",
+  "destination.uid": "",
+  "destination.namespace": "",
   "connection.mtls": false,
+  "origin.ip": "[127 0 0 1]",
+  "check.cache_hit": false,
+  "quota.cache_hit": false,
   "connection.received.bytes": 0,
   "connection.received.bytes_total": 191,
-  "connection.sent.bytes": 138,
-  "connection.sent.bytes_total": 138,
+  "connection.sent.bytes": "*",
+  "connection.sent.bytes_total": "*",
   "connection.duration": "*",
-  "connection.id": "*"
+  "connection.id": "*",
+  "connection.event": "close"
 }
 `
 
 // Stats in Envoy proxy.
 var expectedStats = map[string]int{
-	"tcp_mixer_filter.total_blocking_remote_check_calls": 1,
-	"tcp_mixer_filter.total_blocking_remote_quota_calls": 0,
-	"tcp_mixer_filter.total_check_calls":                 1,
+	// Policy check stats
+	"tcp_mixer_filter.total_check_calls":             1,
+	"tcp_mixer_filter.total_check_cache_hits":        0,
+	"tcp_mixer_filter.total_check_cache_misses":      1,
+	"tcp_mixer_filter.total_check_cache_hit_accepts": 0,
+	"tcp_mixer_filter.total_check_cache_hit_denies":  0,
+	"tcp_mixer_filter.total_remote_check_calls":      1,
+	"tcp_mixer_filter.total_remote_check_accepts":    1,
+	"tcp_mixer_filter.total_remote_check_denies":     0,
+	// Quota check stats
 	"tcp_mixer_filter.total_quota_calls":                 0,
-	"tcp_mixer_filter.total_remote_check_calls":          1,
+	"tcp_mixer_filter.total_quota_cache_hits":            0,
+	"tcp_mixer_filter.total_quota_cache_misses":          0,
+	"tcp_mixer_filter.total_quota_cache_hit_accepts":     0,
+	"tcp_mixer_filter.total_quota_cache_hit_denies":      0,
 	"tcp_mixer_filter.total_remote_quota_calls":          0,
-	"tcp_mixer_filter.total_remote_report_calls":         2,
-	"tcp_mixer_filter.total_report_calls":                2,
+	"tcp_mixer_filter.total_remote_quota_accepts":        0,
+	"tcp_mixer_filter.total_remote_quota_denies":         0,
+	"tcp_mixer_filter.total_remote_quota_prefetch_calls": 0,
+	// Stats for RPCs to mixer policy server
+	"tcp_mixer_filter.total_remote_calls":             1,
+	"tcp_mixer_filter.total_remote_call_successes":    1,
+	"tcp_mixer_filter.total_remote_call_timeouts":     0,
+	"tcp_mixer_filter.total_remote_call_send_errors":  0,
+	"tcp_mixer_filter.total_remote_call_other_errors": 0,
+	// Report stats
+	"tcp_mixer_filter.total_remote_report_calls": 3,
+	"tcp_mixer_filter.total_report_calls":        3,
 }
 
 func TestTCPMixerFilterPeriodicalReport(t *testing.T) {
 	s := env.NewTestSetup(env.TCPMixerFilterPeriodicalReportTest, t)
-	env.SetTCPReportInterval(s.V2().TCPServerConf, 2)
-	env.SetStatsUpdateInterval(s.V2(), 1)
+	env.SetTCPReportInterval(s.MfConfig().TCPServerConf, 2)
+	env.SetStatsUpdateInterval(s.MfConfig(), 1)
 	// Disable check cache.
-	env.DisableTCPClientCache(s.V2().TCPServerConf, true, true, true)
+	env.DisableTCPClientCache(s.MfConfig().TCPServerConf, true, true, true)
 	if err := s.SetUp(); err != nil {
 		t.Fatalf("Failed to setup test: %v", err)
 	}
@@ -95,13 +152,10 @@ func TestTCPMixerFilterPeriodicalReport(t *testing.T) {
 		t.Errorf("Failed in request %s: %v", tag, err)
 	}
 
+	s.VerifyReport("openReport", openReportAttributesOkPost)
 	s.VerifyReport("deltaReport", deltaReportAttributesOkPost)
 	s.VerifyReport("finalReport", finalReportAttributesOkPost)
 
 	// Check stats for Check, Quota and report calls.
-	if respStats, err := s.WaitForStatsUpdateAndGetStats(2); err == nil {
-		s.VerifyStats(respStats, expectedStats)
-	} else {
-		t.Errorf("Failed to get stats from Envoy %v", err)
-	}
+	s.VerifyStats(expectedStats)
 }

@@ -1,27 +1,8 @@
-reviewers:
-  - geeknoid
-  - andraxylia
-  - costinm
-  - Douglas-reid
-  - ldemailly
-  - rshriram
-  - sebastienvas
-  - mandarjog
-  - frankbu
-  - linsun
-  - kyessenov
-  - hklai
-  - wattli
+options:
+  no_parent_owners: true
+
 approvers:
   - geeknoid
-  - andraxylia
-  - costinm
-  - Douglas-reid
-  - ldemailly
-  - rshriram
-  - mandarjog
-  - frankbu
-  - linsun
-  - kyessenov
-  - hklai
-  - wattli
+  - nmittler
+  - ozevren
+

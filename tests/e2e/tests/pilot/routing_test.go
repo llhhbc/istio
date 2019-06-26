@@ -12,91 +12,120 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Routing tests
-
 package pilot
 
 import (
 	"fmt"
 	"regexp"
 	"strconv"
-	"strings"
+	"testing"
 	"time"
 
-	multierror "github.com/hashicorp/go-multierror"
+	"github.com/hashicorp/go-multierror"
 
-	"istio.io/istio/pkg/log"
-	tutil "istio.io/istio/tests/e2e/tests/pilot/util"
+	"istio.io/istio/tests/util"
+	"istio.io/pkg/log"
 )
 
-type routing struct {
-	*tutil.Environment
-}
+func TestRoutes(t *testing.T) {
+	samples := 100
 
-func (t *routing) String() string {
-	return "routing-rules"
-}
+	var cfgs *deployableConfig
+	applyRuleFunc := func(t *testing.T, ruleYaml string) {
+		// Delete the previous rule if there was one. No delay on the teardown, since we're going to apply
+		// a delay when we push the new config.
+		if cfgs != nil {
+			if err := cfgs.TeardownNoDelay(); err != nil {
+				t.Fatal(err)
+			}
+			cfgs = nil
+		}
 
-func (t *routing) Setup() error {
-	return nil
-}
-
-// TODO: test negatives
-func (t *routing) Run() error {
-	versions := make([]string, 0)
-	if t.Config.V1alpha1 {
-		versions = append(versions, "v1alpha1")
+		// Apply the new rule
+		cfgs = &deployableConfig{
+			Namespace:  tc.Kube.Namespace,
+			YamlFiles:  []string{ruleYaml},
+			kubeconfig: tc.Kube.KubeConfig,
+		}
+		if err := cfgs.Setup(); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if t.Config.V1alpha2 {
-		versions = append(versions, "v1alpha2")
-	}
+	// Upon function exit, delete the active rule.
+	defer func() {
+		if cfgs != nil {
+			_ = cfgs.Teardown()
+		}
+	}()
 
 	cases := []struct {
-		description string
-		config      string
-		check       func() error
+		testName      string
+		description   string
+		config        string
+		scheme        string
+		src           string
+		dst           string
+		headerKey     string
+		headerVal     string
+		expectedCount map[string]int
+		operation     string
+		onFailure     func()
 	}{
 		{
 			// First test default routing
-			description: "routing all traffic to c-v1",
-			config:      "rule-default-route.yaml.tmpl",
-			check: func() error {
-				return t.verifyRouting("http", "a", "c", "", "", 100, map[string]int{"v1": 100, "v2": 0}, "default-route")
-			},
+			testName:      "a->c[v1=100]",
+			description:   "routing all traffic to c-v1",
+			config:        "rule-default-route.yaml",
+			scheme:        "http",
+			src:           "a",
+			dst:           "c",
+			headerKey:     "",
+			headerVal:     "",
+			expectedCount: map[string]int{"v1": 100, "v2": 0},
+			operation:     "c.istio-system.svc.cluster.local:80/*",
 		},
 		{
-			description: "routing 75 percent to c-v1, 25 percent to c-v2",
-			config:      "rule-weighted-route.yaml.tmpl",
-			check: func() error {
-				return t.verifyRouting("http", "a", "c", "", "", 100, map[string]int{"v1": 75, "v2": 25}, "")
-			},
+			testName:      "a->c[v1=75,v2=25]",
+			description:   "routing 75 percent to c-v1, 25 percent to c-v2",
+			config:        "rule-weighted-route.yaml",
+			scheme:        "http",
+			src:           "a",
+			dst:           "c",
+			headerKey:     "",
+			headerVal:     "",
+			expectedCount: map[string]int{"v1": 75, "v2": 25},
 		},
 		{
-			description: "routing 100 percent to c-v2 using header",
-			config:      "rule-content-route.yaml.tmpl",
-			check: func() error {
-				return t.verifyRouting("http", "a", "c", "version", "v2", 100, map[string]int{"v1": 0, "v2": 100}, "")
-			},
+			testName:      "a->c[v2=100]_header",
+			description:   "routing 100 percent to c-v2 using header",
+			config:        "rule-content-route.yaml",
+			scheme:        "http",
+			src:           "a",
+			dst:           "c",
+			headerKey:     "version",
+			headerVal:     "v2",
+			expectedCount: map[string]int{"v1": 0, "v2": 100},
+			operation:     "",
 		},
 		{
-			description: "routing 100 percent to c-v2 using regex header",
-			config:      "rule-regex-route.yaml.tmpl",
-			check: func() error {
-				return t.verifyRouting("http", "a", "c", "foo", "bar", 100, map[string]int{"v1": 0, "v2": 100}, "")
-			},
-		},
-		{
-			description: "fault injection",
-			config:      "rule-fault-injection.yaml.tmpl",
-			check: func() error {
-				return t.verifyFaultInjection("a", "c", "version", "v2", time.Second*5, 503)
-			},
-		},
-		{
-			description: "redirect injection",
-			config:      "rule-redirect-injection.yaml.tmpl",
-			check: func() error {
-				return t.verifyRedirect("a", "c", "b", "/new/path", "testredirect", "enabled", 200)
+			testName:      "a->c[v2=100]_regex_header",
+			description:   "routing 100 percent to c-v2 using regex header",
+			config:        "rule-regex-route.yaml",
+			scheme:        "http",
+			src:           "a",
+			dst:           "c",
+			headerKey:     "foo",
+			headerVal:     "bar",
+			expectedCount: map[string]int{"v1": 0, "v2": 100},
+			operation:     "",
+			onFailure: func() {
+				op, err := tc.Kube.GetRoutes("a")
+				log.Infof("error: %v\n%s", err, op)
+				cfg, err := util.GetConfigs("destinationrules.networking.istio.io",
+					"virtualservices.networking.istio.io", "serviceentries.networking.istio.io",
+					"policies.authentication.istio.io")
+
+				log.Infof("config: %v\n%s", err, cfg)
 			},
 		},
 		// In case of websockets, the server does not return headers as part of response.
@@ -106,180 +135,783 @@ func (t *routing) Run() error {
 		// So the verify checks here are really parsing the output of a websocket message
 		// i.e., we are effectively checking websockets beyond just the upgrade.
 		{
-			description: "routing 100 percent to c-v1 with websocket upgrades",
-			config:      "rule-websocket-route.yaml.tmpl",
-			check: func() error {
-				return t.verifyRouting("ws", "a", "c", "testwebsocket", "enabled", 100, map[string]int{"v1": 100, "v2": 0}, "")
-			},
+			testName:      "a->c[v1=100]_websocket",
+			description:   "routing 100 percent to c-v1 with websocket upgrades",
+			config:        "rule-websocket-route.yaml",
+			scheme:        "ws",
+			src:           "a",
+			dst:           "c",
+			headerKey:     "testwebsocket",
+			headerVal:     "enabled",
+			expectedCount: map[string]int{"v1": 100, "v2": 0},
+			operation:     "",
 		},
 		{
-			description: "routing all traffic to c-v1 with appended headers",
-			config:      "rule-default-route-append-headers.yaml.tmpl",
-			check: func() error {
-				return t.verifyRouting("http", "a", "c", "", "", 100, map[string]int{"v1": 100, "v2": 0}, "default-route")
-			},
+			testName:      "a->c[v1=100]_append_headers",
+			description:   "routing all traffic to c-v1 with appended headers",
+			config:        "rule-default-route-append-headers.yaml",
+			scheme:        "http",
+			src:           "a",
+			dst:           "c",
+			headerKey:     "",
+			headerVal:     "",
+			expectedCount: map[string]int{"v1": 75, "v2": 25},
+			operation:     "c.istio-system.svc.cluster.local:80/*",
 		},
 		{
-			description: "routing all traffic to c-v1 with CORS policy",
-			config:      "rule-default-route-cors-policy.yaml.tmpl",
-			check: func() error {
-				return t.verifyRouting("http", "a", "c", "", "", 100, map[string]int{"v1": 100, "v2": 0}, "default-route")
-			},
+			testName:      "a->c[v1=100]_CORS_policy",
+			description:   "routing all traffic to c-v1 with CORS policy",
+			config:        "rule-default-route-cors-policy.yaml",
+			scheme:        "http",
+			src:           "a",
+			dst:           "c",
+			headerKey:     "",
+			headerVal:     "",
+			expectedCount: map[string]int{"v1": 100, "v2": 0},
+			operation:     "c.istio-system.svc.cluster.local:80/*",
 		},
 		{
-			description: "routing all traffic to c with shadow policy",
-			config:      "rule-default-route-mirrored.yaml.tmpl",
-			check: func() error {
-				return t.verifyRouting("http", "a", "c", "", "", 100, map[string]int{"v1": 50, "v2": 50}, "default-route")
-			},
+			testName:      "a->c[v2=100]",
+			description:   "routing tcp traffic from a to c-v2",
+			config:        "virtualservice-route-tcp-a.yaml",
+			scheme:        "http",
+			src:           "a",
+			dst:           "c:90",
+			headerKey:     "",
+			headerVal:     "",
+			expectedCount: map[string]int{"v1": 0, "v2": 100},
+			operation:     "",
+		},
+		{
+			testName:      "b->c[v1=100]",
+			description:   "routing tcp traffic from b to c-v1",
+			config:        "virtualservice-route-tcp-a.yaml",
+			scheme:        "http",
+			src:           "b",
+			dst:           "c:90",
+			headerKey:     "",
+			headerVal:     "",
+			expectedCount: map[string]int{"v1": 100, "v2": 0},
+			operation:     "",
+		},
+		{
+			testName:      "a->c[v2=100]_tcp_single",
+			description:   "routing tcp traffic from a to single dest c-v2",
+			config:        "virtualservice-route-tcp-weighted.yaml",
+			scheme:        "http",
+			src:           "a",
+			dst:           "c:90",
+			headerKey:     "",
+			headerVal:     "",
+			expectedCount: map[string]int{"v1": 0, "v2": 100},
+			operation:     "",
+		},
+		{
+			testName:      "b->c[v1=30,v2=70]_tcp_weighted",
+			description:   "routing 30 percent to c-v1, 70 percent to c-v2",
+			config:        "virtualservice-route-tcp-weighted.yaml",
+			scheme:        "http",
+			src:           "b",
+			dst:           "c:90",
+			headerKey:     "",
+			headerVal:     "",
+			expectedCount: map[string]int{"v1": 30, "v2": 70},
+			operation:     "",
 		},
 	}
 
-	var errs error
-	for _, version := range versions {
-		if version == "v1alpha2" {
-			if err := t.ApplyConfig("v1alpha2/destination-rule-c.yaml.tmpl", nil); err != nil {
-				errs = multierror.Append(errs, err)
-				continue
-			}
+	t.Run("v1alpha3", func(t *testing.T) {
+		destRule1 := maybeAddTLSForDestinationRule(tc, "testdata/networking/v1alpha3/destination-rule-c.yaml")
+		destRule2 := "testdata/networking/v1alpha3/destination-rule-c-headersubset.yaml"
+		cfgs := &deployableConfig{
+			Namespace:  tc.Kube.Namespace,
+			YamlFiles:  []string{destRule1, destRule2},
+			kubeconfig: tc.Kube.KubeConfig,
 		}
-		for _, cs := range cases {
-			tutil.Tlog("Checking "+version+" routing test", cs.description)
-			if err := t.ApplyConfig(version+"/"+cs.config, nil); err != nil {
-				return err
+		if err := cfgs.Setup(); err != nil {
+			t.Fatal(err)
+		}
+		// Teardown after, but no need to wait, since a delay will be applied by either the next rule's
+		// Setup() or the Teardown() for the final rule.
+		defer cfgs.TeardownNoDelay()
+
+		for _, c := range cases {
+			// Run each case in a function to scope the configuration's lifecycle.
+			func() {
+				ruleYaml := fmt.Sprintf("testdata/networking/v1alpha3/%s", c.config)
+				applyRuleFunc(t, ruleYaml)
+
+				for cluster := range tc.Kube.Clusters {
+					testName := fmt.Sprintf("%s from %s cluster", c.testName, cluster)
+					runRetriableTest(t, testName, 5, func() error {
+						reqURL := fmt.Sprintf("%s://%s/%s", c.scheme, c.dst, c.src)
+						resp := ClientRequest(cluster, c.src, reqURL, samples, fmt.Sprintf("--key %s --val %s", c.headerKey, c.headerVal))
+						count := make(map[string]int)
+						for _, elt := range resp.Version {
+							count[elt]++
+						}
+						log.Infof("request counts %v", count)
+						epsilon := 10
+
+						for version, expected := range c.expectedCount {
+							if count[version] > expected+epsilon || count[version] < expected-epsilon {
+								return fmt.Errorf("expected %v requests (+/-%v) to reach %s => Got %v",
+									expected, epsilon, version, count[version])
+							}
+						}
+
+						return nil
+					}, c.onFailure)
+				}
+			}()
+		}
+	})
+}
+
+func TestRouteFaultInjection(t *testing.T) {
+	destRule := maybeAddTLSForDestinationRule(tc, "testdata/networking/v1alpha3/destination-rule-c.yaml")
+	dRule := &deployableConfig{
+		Namespace:  tc.Kube.Namespace,
+		YamlFiles:  []string{destRule},
+		kubeconfig: tc.Kube.KubeConfig,
+	}
+	if err := dRule.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	// Teardown after, but no need to wait, since a delay will be applied by either the next rule's
+	// Setup() or the Teardown() for the final rule.
+	defer dRule.TeardownNoDelay()
+
+	ruleYaml := fmt.Sprintf("testdata/networking/v1alpha3/rule-fault-injection.yaml")
+	cfgs := &deployableConfig{
+		Namespace:  tc.Kube.Namespace,
+		YamlFiles:  []string{ruleYaml},
+		kubeconfig: tc.Kube.KubeConfig,
+	}
+	if err := cfgs.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer cfgs.Teardown()
+
+	for cluster := range tc.Kube.Clusters {
+		runRetriableTest(t, "v1alpha3", 5, func() error {
+			reqURL := "http://c/a"
+
+			start := time.Now()
+			resp := ClientRequest(cluster, "a", reqURL, 1, "--key version --val v2")
+			elapsed := time.Since(start)
+
+			statusCode := ""
+			if len(resp.Code) > 0 {
+				statusCode = resp.Code[0]
 			}
 
-			if err := tutil.Repeat(cs.check, 5, time.Second); err != nil {
-				log.Infof("Failed the test with %v", err)
-				errs = multierror.Append(errs, multierror.Prefix(err, version+" "+cs.description))
-			} else {
-				log.Info("Success!")
+			respCode := 503
+			respTime := time.Second * 5
+			epsilon := time.Second * 2 // +/- 2s variance
+			if elapsed > respTime+epsilon || elapsed < respTime-epsilon || strconv.Itoa(respCode) != statusCode {
+				return fmt.Errorf("fault injection verification failed: "+
+					"response time is %s with status code %s, "+
+					"expected response time is %s +/- %s with status code %d", elapsed, statusCode, respTime, epsilon, respCode)
 			}
-		}
-		log.Infof("Cleaning up %s route rules...", version)
-		if err := t.DeleteAllConfigs(); err != nil {
-			log.Warna(err)
+			return nil
+		})
+	}
+}
+
+func TestRouteRedirectInjection(t *testing.T) {
+	// Push the rule config.
+	ruleYaml := fmt.Sprintf("testdata/networking/v1alpha3/rule-redirect-injection.yaml")
+	cfgs := &deployableConfig{
+		Namespace:  tc.Kube.Namespace,
+		YamlFiles:  []string{ruleYaml},
+		kubeconfig: tc.Kube.KubeConfig,
+	}
+	if err := cfgs.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer cfgs.Teardown()
+
+	for cluster := range tc.Kube.Clusters {
+		runRetriableTest(t, "v1alpha3", 5, func() error {
+			targetHost := "b"
+			targetPath := "/new/path"
+
+			reqURL := "http://c/a"
+			resp := ClientRequest(cluster, "a", reqURL, 1, "--key testredirect --val enabled")
+			if !resp.IsHTTPOk() {
+				return fmt.Errorf("redirect failed: response status code: %v, expected 200", resp.Code)
+			}
+
+			var host string
+			if matches := regexp.MustCompile("(?i)Host=(.*)").FindStringSubmatch(resp.Body); len(matches) >= 2 {
+				host = matches[1]
+			}
+			if host != targetHost {
+				return fmt.Errorf("redirect failed: response body contains Host=%v, expected Host=%v", host, targetHost)
+			}
+
+			exp := regexp.MustCompile("(?i)URL=(.*)")
+			paths := exp.FindAllStringSubmatch(resp.Body, -1)
+			var path string
+			if len(paths) > 1 {
+				path = paths[1][1]
+			}
+			if path != targetPath {
+				return fmt.Errorf("redirect failed: response body contains URL=%v, expected URL=%v", path, targetPath)
+			}
+
+			return nil
+		})
+	}
+}
+
+func TestRouteMirroring(t *testing.T) {
+	logs := newAccessLogs()
+	cfgs := &deployableConfig{
+		Namespace:  tc.Kube.Namespace,
+		YamlFiles:  []string{"testdata/networking/v1alpha3/rule-default-route-mirrored.yaml"},
+		kubeconfig: tc.Kube.KubeConfig,
+	}
+	if err := cfgs.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer cfgs.Teardown()
+
+	reqURL := "http://c/a"
+	for cluster := range tc.Kube.Clusters {
+		for i := 1; i <= 100; i++ {
+			resp := ClientRequest(cluster, "a", reqURL, 1, fmt.Sprintf("--key X-Request-Id --val %d", i))
+			logEntry := fmt.Sprintf("HTTP request from a in %s cluster to c.istio-system.svc.cluster.local:80", cluster)
+			if len(resp.ID) > 0 {
+				id := resp.ID[0]
+				logs.add(cluster, "c", id, logEntry)
+				logs.add(cluster, "b", id, logEntry) // Request should also be mirrored here
+			}
 		}
 	}
-	return errs
+
+	t.Run("check", func(t *testing.T) {
+		logs.checkLogs(t)
+	})
 }
 
-func (t *routing) Teardown() {
-}
-
-func counts(elts []string) map[string]int {
-	out := make(map[string]int)
-	for _, elt := range elts {
-		out[elt] = out[elt] + 1
+// Inject a fault filter in a normal path and check if the filters are triggered
+func TestEnvoyFilterConfigViaCRD(t *testing.T) {
+	cfgs := &deployableConfig{
+		Namespace:  tc.Kube.Namespace,
+		YamlFiles:  []string{"testdata/networking/v1alpha3/envoyfilter-c.yaml"},
+		kubeconfig: tc.Kube.KubeConfig,
 	}
-	return out
+	if err := cfgs.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer cfgs.Teardown()
+
+	for cluster := range tc.Kube.Clusters {
+		runRetriableTest(t, "v1alpha3", 5, func() error {
+			reqURL := "http://c/a"
+			resp := ClientRequest(cluster, "a", reqURL, 1, "--key envoyfilter-test --val foobar123")
+
+			statusCode := ""
+			if len(resp.Code) > 0 {
+				statusCode = resp.Code[0]
+			}
+
+			expectedRespCode := 444
+			if strconv.Itoa(expectedRespCode) != statusCode {
+				return fmt.Errorf("test configuration of envoy filters via CRD (EnvoyFilter) failed."+
+					"Expected %d response code from the manually configured fault filter. Got %s", expectedRespCode, statusCode)
+			}
+			return nil
+		})
+	}
 }
 
-// verifyRouting verifies if the traffic is split as specified across different deployments in a service
-func (t *routing) verifyRouting(scheme, src, dst, headerKey, headerVal string,
-	samples int, expectedCount map[string]int, operation string) error {
-	url := fmt.Sprintf("%s://%s/%s", scheme, dst, src)
-	log.Infof("Making %d requests (%s) from %s...\n", samples, url, src)
+func TestHeadersManipulations(t *testing.T) {
+	destRule := maybeAddTLSForDestinationRule(tc, "testdata/networking/v1alpha3/destination-rule-c.yaml")
+	dRule := &deployableConfig{
+		Namespace:  tc.Kube.Namespace,
+		YamlFiles:  []string{destRule},
+		kubeconfig: tc.Kube.KubeConfig,
+	}
+	if err := dRule.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	// Teardown after, but no need to wait, since a delay will be applied by either the next rule's
+	// Setup() or the Teardown() for the final rule.
+	defer dRule.TeardownNoDelay()
 
-	resp := t.ClientRequest(src, url, samples, fmt.Sprintf("-key %s -val %s", headerKey, headerVal))
-	count := counts(resp.Version)
-	log.Infof("request counts %v", count)
+	ruleYaml := fmt.Sprintf("testdata/networking/v1alpha3/rule-default-route-append-headers.yaml")
+	cfgs := &deployableConfig{
+		Namespace:  tc.Kube.Namespace,
+		YamlFiles:  []string{ruleYaml},
+		kubeconfig: tc.Kube.KubeConfig,
+	}
+	if err := cfgs.Setup(); err != nil {
+		t.Fatal(err)
+	}
+	defer cfgs.Teardown()
+
+	// deprecated
+	deprecatedHeaderRegexp := regexp.MustCompile("(?i)istio-custom-header=user-defined-value")
+	deprecatedReqHeaderRegexp := regexp.MustCompile("(?i)istio-custom-req-header=user-defined-value")
+	deprecatedReqHeaderRemoveRegexp := regexp.MustCompile("(?i)istio-custom-req-header-remove=to-be-removed")
+	deprecatedRespHeaderRegexp := regexp.MustCompile("(?i)ResponseHeader=istio-custom-resp-header:user-defined-value")
+	deprecatedRespHeaderRemoveRegexp := regexp.MustCompile("(?i)ResponseHeader=istio-custom-resp-header-remove:to-be-removed")
+	deprecatedDestReqHeaderRegexp := regexp.MustCompile("(?i)istio-custom-dest-req-header=user-defined-value")
+	deprecatedDestReqHeaderRemoveRegexp := regexp.MustCompile("(?i)istio-custom-dest-req-header-remove=to-be-removed")
+	deprecatedDestRespHeaderRegexp := regexp.MustCompile("(?i)ResponseHeader=istio-custom-dest-resp-header:user-defined-value")
+	deprecatedDestRespHeaderRemoveRegexp := regexp.MustCompile("(?i)ResponseHeader=istio-custom-dest-resp-header-remove:to-be-removed")
+
+	// the response body contains the request and response headers.
+	// appended headers will appear as separate headers with same name
+	// examples from body:
+	// [1] ResponseHeader=Res-Append:sent-by-server
+	// [1 body] Res-Append:sent-by-server
+	reqAppendRegexp1 := regexp.MustCompile("(?i) req-append=sent-by-client")
+	reqAppendRegexp2 := regexp.MustCompile("(?i) req-append=added-in-request")
+	reqSetRegexp := regexp.MustCompile("(?i) req-replace=new-value")
+	reqRemoveRegexp := regexp.MustCompile("(?i) req-remove=to-be-removed")
+	resAppendRegexp1 := regexp.MustCompile("(?i)=res-append:sent-by-server")
+	resAppendRegexp2 := regexp.MustCompile("(?i)=res-append:added-in-response")
+	resSetRegexp := regexp.MustCompile("(?i)=res-replace:new-value")
+	resRemoveRegexp := regexp.MustCompile("(?i)=res-remove:to-be-removed")
+	dstReqAppendRegexp1 := regexp.MustCompile("(?i) dst-req-append=sent-by-client")
+	dstReqAppendRegexp2 := regexp.MustCompile("(?i) dst-req-append=added-in-request")
+	dstReqSetRegexp := regexp.MustCompile("(?i) dst-req-replace=new-value")
+	dstReqRemoveRegexp := regexp.MustCompile("(?i) dst-req-remove=to-be-removed")
+	dstResAppendRegexp1 := regexp.MustCompile("(?i)=dst-res-append:sent-by-server")
+	dstResAppendRegexp2 := regexp.MustCompile("(?i)=dst-res-append:added-in-response")
+	dstResSetRegexp := regexp.MustCompile("(?i)=dst-res-replace:new-value")
+	dstResRemoveRegexp := regexp.MustCompile("(?i)=dst-res-remove:to-be-removed")
+
 	epsilon := 10
+	numRequests := 100
+	numNoRequests := 0
+	numV1 := 75
+	numV2 := 25
 
-	var errs error
-	for version, expected := range expectedCount {
-		if count[version] > expected+epsilon || count[version] < expected-epsilon {
-			errs = multierror.Append(errs, fmt.Errorf("expected %v requests (+/-%v) to reach %s => Got %v",
-				expected, epsilon, version, count[version]))
+	verifyCount := func(exp *regexp.Regexp, body string, expected int) error {
+		found := len(exp.FindAllStringSubmatch(body, -1))
+		if found < expected-epsilon || found > expected+epsilon {
+			return fmt.Errorf("got %d, expected %d +/- %d", found, expected, epsilon)
 		}
-	}
-
-	if operation != "" {
-		if err := t.verifyDecorator(operation); err != nil {
-			errs = multierror.Append(errs, err)
-		}
-	}
-
-	return errs
-}
-
-// verify that the traces were picked up by Zipkin and decorator has been applied
-func (t *routing) verifyDecorator(operation string) error {
-	if !t.Config.Zipkin {
 		return nil
 	}
 
-	response := t.Environment.ClientRequest(
-		"t",
-		fmt.Sprintf("http://zipkin.%s:9411/api/v1/traces", t.Config.IstioNamespace),
-		1, "",
-	)
+	// traffic is split 75/25 between v1 and v2
+	// traffic to v1 has header manipulation rules, v2 does not
+	// verify the split, and then verify the header counts match what we would expect
+	//
+	// note: we do not explicitly verify that individual requests all have the proper
+	// header manipulation performed on them. this isn't ideal, but that is difficult
+	// to verify this without either,
+	// a) making each request individually (very slow)
+	// b) or adding a bunch more parsing to the request function, so we have access to headers per request.
+	for cluster := range tc.Kube.Clusters {
+		runRetriableTest(t, "v1alpha3", 5, func() error {
+			reqURL := "http://c/a?headers=" +
+				"istio-custom-resp-header-remove:to-be-removed," +
+				"istio-custom-dest-resp-header-remove:to-be-removed," +
+				"res-append:sent-by-server," +
+				"res-replace:to-be-replaced," +
+				"res-remove:to-be-removed," +
+				"dst-res-append:sent-by-server," +
+				"dst-res-replace:to-be-replaced," +
+				"dst-res-remove:to-be-removed"
 
-	if !response.IsHTTPOk() {
-		return fmt.Errorf("could not retrieve traces from zipkin")
+			extra := "--headers istio-custom-req-header-remove:to-be-removed," +
+				"istio-custom-dest-req-header-remove:to-be-removed," +
+				"req-append:sent-by-client," +
+				"req-replace:to-be-replaced," +
+				"req-remove:to-be-removed," +
+				"dst-req-append:sent-by-client," +
+				"dst-req-replace:to-be-replaced," +
+				"dst-req-remove:to-be-removed"
+			resp := ClientRequest(cluster, "a", reqURL, numRequests, extra)
+
+			// ensure version distribution
+			counts := make(map[string]int)
+			for _, version := range resp.Version {
+				counts[version]++
+			}
+			if counts["v1"] < numV1-epsilon || counts["v1"] > numV1+epsilon {
+				return fmt.Errorf("expected %d +/- %d requests to reach v1, got %d", numV1, epsilon, counts["v1"])
+			}
+			if counts["v2"] < numV2-epsilon || counts["v2"] > numV2+epsilon {
+				return fmt.Errorf("expected %d +/- %d requests to reach v2, got %d", numV2, epsilon, counts["v2"])
+			}
+
+			// ensure the route-wide deprecated request header add works, regardless of service version
+			if err := verifyCount(deprecatedHeaderRegexp, resp.Body, numRequests); err != nil {
+				return multierror.Prefix(err, "route deprecated request header count does not have expected distribution")
+			}
+
+			// ensure the route-wide request header add works, regardless of service version
+			if err := verifyCount(deprecatedReqHeaderRegexp, resp.Body, numRequests); err != nil {
+				return multierror.Prefix(err, "route request header count does not have expected distribution")
+			}
+
+			// ensure the route-wide request header remove works, regardless of service version
+			if err := verifyCount(deprecatedReqHeaderRemoveRegexp, resp.Body, numNoRequests); err != nil {
+				return multierror.Prefix(err, "route to remove request header count does not have expected distribution")
+			}
+
+			// ensure the route-wide response header add works, regardless of service version
+			if err := verifyCount(deprecatedRespHeaderRegexp, resp.Body, numRequests); err != nil {
+				return multierror.Prefix(err, "route response header count does not have expected distribution")
+			}
+
+			// ensure the route-wide response header remove works, regardless of service version
+			if err := verifyCount(deprecatedRespHeaderRemoveRegexp, resp.Body, numNoRequests); err != nil {
+				return multierror.Prefix(err, "route to remove response header count does not have expected distribution")
+			}
+
+			// verify request header add count
+			if err := verifyCount(deprecatedDestReqHeaderRegexp, resp.Body, numV1); err != nil {
+				return multierror.Prefix(err, "destination request header count does not have expected distribution")
+			}
+
+			// verify request header remove count
+			if err := verifyCount(deprecatedDestReqHeaderRemoveRegexp, resp.Body, numV2); err != nil {
+				return multierror.Prefix(err, "destination to remove request header count does not have expected distribution")
+			}
+
+			// verify response header add count
+			if err := verifyCount(deprecatedDestRespHeaderRegexp, resp.Body, numV1); err != nil {
+				return multierror.Prefix(err, "destination response header count does not have expected distribution")
+			}
+
+			// verify response header remove count
+			if err := verifyCount(deprecatedDestRespHeaderRemoveRegexp, resp.Body, numV2); err != nil {
+				return multierror.Prefix(err, "destination to remove response header count does not have expected distribution")
+			}
+
+			// begin verify header manipulations
+			if err1 := verifyCount(reqAppendRegexp1, resp.Body, numRequests); err1 != nil {
+				if err2 := verifyCount(reqAppendRegexp2, resp.Body, numRequests); err2 != nil {
+					err := multierror.Append(err1, err2)
+					return multierror.Prefix(err, "route level append request headers count does not have expected distribution")
+				}
+			}
+
+			if err := verifyCount(reqSetRegexp, resp.Body, numRequests); err != nil {
+				return multierror.Prefix(err, "route level set request headers count does not have expected distribution")
+			}
+
+			if err := verifyCount(reqRemoveRegexp, resp.Body, numNoRequests); err != nil {
+				return multierror.Prefix(err, "route level remove request request headers count does not have expected distribution")
+			}
+
+			if err1 := verifyCount(resAppendRegexp1, resp.Body, numRequests); err1 != nil {
+				if err2 := verifyCount(resAppendRegexp2, resp.Body, numRequests); err2 != nil {
+					err := multierror.Append(err1, err2)
+					return multierror.Prefix(err, "route level append response headers count does not have expected distribution")
+				}
+			}
+
+			if err := verifyCount(resSetRegexp, resp.Body, numRequests); err != nil {
+				return multierror.Prefix(err, "route level set response headers count does not have expected distribution")
+			}
+
+			if err := verifyCount(resRemoveRegexp, resp.Body, numNoRequests); err != nil {
+				return multierror.Prefix(err, "route level remove response headers count does not have expected distribution")
+			}
+
+			if err1 := verifyCount(dstReqAppendRegexp1, resp.Body, numV1); err1 != nil {
+				if err2 := verifyCount(dstReqAppendRegexp2, resp.Body, numV1); err2 != nil {
+					err := multierror.Append(err1, err2)
+					return multierror.Prefix(err, "destination level append request headers count does not have expected distribution")
+				}
+			}
+
+			if err := verifyCount(dstReqSetRegexp, resp.Body, numV1); err != nil {
+				return multierror.Prefix(err, "destination level set request headers count does not have expected distribution")
+			}
+
+			if err := verifyCount(dstReqRemoveRegexp, resp.Body, numV2); err != nil {
+				return multierror.Prefix(err, "destination level remove request headers count does not have expected distribution")
+			}
+
+			if err1 := verifyCount(dstResAppendRegexp1, resp.Body, numV1); err1 != nil {
+				if err2 := verifyCount(dstResAppendRegexp2, resp.Body, numV1); err2 != nil {
+					err := multierror.Append(err1, err2)
+					return multierror.Prefix(err, "destination level append response headers count does not have expected distribution")
+				}
+			}
+
+			if err := verifyCount(dstResSetRegexp, resp.Body, numV1); err != nil {
+				return multierror.Prefix(err, "destination level set response headers count does not have expected distribution")
+			}
+
+			if err := verifyCount(dstResRemoveRegexp, resp.Body, numV2); err != nil {
+				return multierror.Prefix(err, "destination level remove response headers count does not have expected distribution")
+			}
+
+			return nil
+		})
 	}
-
-	text := fmt.Sprintf("\"name\":\"%s\"", operation)
-	if strings.Count(response.Body, text) != 10 {
-		return fmt.Errorf("could not find operation %q in zipkin traces", operation)
-	}
-
-	return nil
 }
 
-// verifyFaultInjection verifies if the fault filter was setup properly
-func (t *routing) verifyFaultInjection(src, dst, headerKey, headerVal string,
-	respTime time.Duration, respCode int) error {
-	url := fmt.Sprintf("http://%s/%s", dst, src)
-	log.Infof("Making 1 request (%s) from %s...\n", url, src)
+func TestDestinationRuleExportTo(t *testing.T) {
+	var cfgs []*deployableConfig
+	applyRuleFunc := func(t *testing.T, ruleYamls map[string][]string) {
+		// Delete the previous rule if there was one. No delay on the teardown, since we're going to apply
+		// a delay when we push the new config.
+		for _, cfg := range cfgs {
+			if cfg != nil {
+				if err := cfg.TeardownNoDelay(); err != nil {
+					t.Fatal(err)
+				}
+				cfg = nil
+			}
+		}
 
-	start := time.Now()
-	resp := t.ClientRequest(src, url, 1, fmt.Sprintf("-key %s -val %s", headerKey, headerVal))
-	elapsed := time.Since(start)
+		cfgs = make([]*deployableConfig, 0)
+		for ns, rules := range ruleYamls {
+			// Apply the new rules in the namespace
+			cfg := &deployableConfig{
+				Namespace:  ns,
+				YamlFiles:  rules,
+				kubeconfig: tc.Kube.KubeConfig,
+			}
+			if err := cfg.Setup(); err != nil {
+				t.Fatal(err)
+			}
+			cfgs = append(cfgs, cfg)
+		}
+	}
+	// Upon function exit, delete the active rule.
+	defer func() {
+		for _, cfg := range cfgs {
+			if cfg != nil {
+				_ = cfg.Teardown()
+			}
+		}
+	}()
 
-	statusCode := ""
-	if len(resp.Code) > 0 {
-		statusCode = resp.Code[0]
+	// Create the namespaces
+	// NOTE: Use different namespaces for each test to avoid
+	// collision. Namespace deletion takes time. If the other test
+	// starts before this namespace is deleted, namespace creation in the other test will fail.
+	for _, ns := range []string{"dns1", "dns2"} {
+		if err := util.CreateNamespace(ns, tc.Kube.KubeConfig); err != nil {
+			t.Errorf("Unable to create namespace %s: %v", ns, err)
+		}
+		defer func(ns string) {
+			if err := util.DeleteNamespace(ns, tc.Kube.KubeConfig); err != nil {
+				t.Errorf("Failed to delete namespace %s", ns)
+			}
+		}(ns)
 	}
 
-	// +/- 2s variance
-	epsilon := time.Second * 2
-	if elapsed > respTime+epsilon || elapsed < respTime-epsilon || strconv.Itoa(respCode) != statusCode {
-		return fmt.Errorf("fault injection verification failed: "+
-			"response time is %s with status code %s, "+
-			"expected response time is %s +/- %s with status code %d", elapsed, statusCode, respTime, epsilon, respCode)
+	cases := []struct {
+		testName        string
+		rules           map[string][]string
+		src             string
+		dst             string
+		expectedSuccess bool
+		onFailure       func()
+	}{
+		// TODO: this test cannot be enabled until we start running e2e tests in multiple namespaces or
+		// in a namespace other than istio-system - which happens to be the config root namespace
+		// only public rules work in the config root namespace
+		//{
+		//	testName:        "private destination rule in same namespace",
+		//	rules:           map[string][]string{tc.Kube.Namespace: {"destination-rule-c-private.yaml"}},
+		//	src:             "a",
+		//	dst:             "c",
+		//	expectedSuccess: true,
+		//},
+		{
+			testName:        "private destination rule in different namespaces",
+			rules:           map[string][]string{"dns1": {"destination-rule-c-private.yaml"}},
+			src:             "a",
+			dst:             "c",
+			expectedSuccess: false,
+		},
+		// TODO: These two cases cannot be tested reliably until the EDS issue with
+		// destination rules is fixed. https://github.com/istio/istio/issues/10817
+		//{
+		//	testName:        "private rule in a namespace overrides public rule in another namespace",
+		//},
+		//{
+		//	testName:        "public rule in service's namespace overrides public rule in another namespace",
+		//},
 	}
-	return nil
+
+	t.Run("v1alpha3", func(t *testing.T) {
+		cfgs := &deployableConfig{
+			Namespace:  tc.Kube.Namespace,
+			YamlFiles:  []string{"testdata/networking/v1alpha3/rule-default-route.yaml"},
+			kubeconfig: tc.Kube.KubeConfig,
+		}
+		if err := cfgs.Setup(); err != nil {
+			t.Fatal(err)
+		}
+		// Teardown after, but no need to wait, since a delay will be applied by either the next rule's
+		// Setup() or the Teardown() for the final rule.
+		defer cfgs.TeardownNoDelay()
+
+		for _, c := range cases {
+			// Run each case in a function to scope the configuration's lifecycle.
+			func() {
+				for _, yamls := range c.rules {
+					for i, yaml := range yamls {
+						ruleYaml := fmt.Sprintf("testdata/networking/v1alpha3/%s", yaml)
+						yamls[i] = maybeAddTLSForDestinationRule(tc, ruleYaml)
+					}
+				}
+				applyRuleFunc(t, c.rules)
+				// Wait a few seconds so that the older proxy listeners get overwritten
+				time.Sleep(10 * time.Second)
+
+				for cluster := range tc.Kube.Clusters {
+					testName := fmt.Sprintf("%s from %s cluster", c.testName, cluster)
+					runRetriableTest(t, testName, 5, func() error {
+						reqURL := fmt.Sprintf("http://%s/%s", c.dst, c.src)
+						resp := ClientRequest(cluster, c.src, reqURL, 1, "")
+						if c.expectedSuccess && !resp.IsHTTPOk() {
+							return fmt.Errorf("failed request %s, %v", reqURL, resp.Code)
+						}
+						if !c.expectedSuccess && resp.IsHTTPOk() {
+							return fmt.Errorf("expect failed request %s, but got success", reqURL)
+						}
+						return nil
+					}, c.onFailure)
+				}
+			}()
+		}
+	})
 }
 
-// verifyRedirect verifies if the http redirect was setup properly
-func (t *routing) verifyRedirect(src, dst, targetHost, targetPath, headerKey, headerVal string, respCode int) error {
-	url := fmt.Sprintf("http://%s/%s", dst, src)
-	log.Infof("Making 1 request (%s) from %s...\n", url, src)
+func TestSidecarScope(t *testing.T) {
+	var cfgs []*deployableConfig
+	applyRuleFunc := func(t *testing.T, ruleYamls map[string][]string) {
+		// Delete the previous rule if there was one. No delay on the teardown, since we're going to apply
+		// a delay when we push the new config.
+		for _, cfg := range cfgs {
+			if cfg != nil {
+				if err := cfg.TeardownNoDelay(); err != nil {
+					t.Fatal(err)
+				}
+				cfg = nil
+			}
+		}
 
-	failureMsg := "redirect verification failed"
-	resp := t.ClientRequest(src, url, 1, fmt.Sprintf("-key %s -val %s", headerKey, headerVal))
-	if len(resp.Code) == 0 || resp.Code[0] != fmt.Sprint(respCode) {
-		return fmt.Errorf("%s: response status code: %v, expected %v", failureMsg, resp.Code, respCode)
+		cfgs = make([]*deployableConfig, 0)
+		for ns, rules := range ruleYamls {
+			// Apply the new rules in the namespace
+			cfg := &deployableConfig{
+				Namespace:  ns,
+				YamlFiles:  rules,
+				kubeconfig: tc.Kube.KubeConfig,
+			}
+			if err := cfg.Setup(); err != nil {
+				t.Fatal(err)
+			}
+			cfgs = append(cfgs, cfg)
+		}
+	}
+	// Upon function exit, delete the active rule.
+	defer func() {
+		for _, cfg := range cfgs {
+			if cfg != nil {
+				_ = cfg.Teardown()
+			}
+		}
+	}()
+
+	rules := make(map[string][]string)
+	rules[tc.Kube.Namespace] = []string{"testdata/networking/v1alpha3/sidecar-scope-ns1-ns2.yaml"}
+	rules["ns1"] = []string{
+		"testdata/networking/v1alpha3/service-entry-http-scope-public.yaml",
+		"testdata/networking/v1alpha3/service-entry-http-scope-private.yaml",
+		"testdata/networking/v1alpha3/virtualservice-http-scope-public.yaml",
+		"testdata/networking/v1alpha3/virtualservice-http-scope-private.yaml",
+	}
+	rules["ns2"] = []string{"testdata/networking/v1alpha3/service-entry-tcp-scope-public.yaml"}
+
+	// Create the namespaces and install the rules in each namespace
+	for _, ns := range []string{"ns1", "ns2"} {
+		if err := util.CreateNamespace(ns, tc.Kube.KubeConfig); err != nil {
+			t.Errorf("Unable to create namespace %s: %v", ns, err)
+		}
+		defer func(ns string) {
+			if err := util.DeleteNamespace(ns, tc.Kube.KubeConfig); err != nil {
+				t.Errorf("Failed to delete namespace %s", ns)
+			}
+		}(ns)
+	}
+	applyRuleFunc(t, rules)
+	// Wait a few seconds so that the older proxy listeners get overwritten
+	time.Sleep(10 * time.Second)
+
+	cases := []struct {
+		testName    string
+		reqURL      string
+		host        string
+		expectedHdr *regexp.Regexp
+		reachable   bool
+		onFailure   func()
+	}{
+		{
+			testName:  "cannot reach services if not imported",
+			reqURL:    "http://c/a",
+			host:      "c",
+			reachable: false,
+		},
+		{
+			testName:    "ns1: http://bookinfo.com:9999 reachable",
+			reqURL:      "http://127.255.0.1:9999/a",
+			host:        "bookinfo.com:9999",
+			expectedHdr: regexp.MustCompile("(?i) scope=public"),
+			reachable:   true,
+		},
+		{
+			testName:  "ns1: http://private.com:9999 not reachable",
+			reqURL:    "http://127.255.0.1:9999/a",
+			host:      "private.com:9999",
+			reachable: false,
+		},
+		{
+			testName:  "ns2: service.tcp.com:8888 reachable",
+			reqURL:    "http://127.255.255.11:8888/a",
+			host:      "tcp.com",
+			reachable: true,
+		},
+		{
+			testName:  "ns1: bookinfo.com:9999 reachable via egress TCP listener 7.7.7.7:23145",
+			reqURL:    "http://7.7.7.7:23145/a",
+			host:      "bookinfo.com:9999",
+			reachable: true,
+		},
 	}
 
-	var host string
-	if matches := regexp.MustCompile("(?i)Host=(.*)").FindStringSubmatch(resp.Body); len(matches) >= 2 {
-		host = matches[1]
-	}
-	if host != targetHost {
-		return fmt.Errorf("%s: response body contains Host=%v, expected Host=%v", failureMsg, host, targetHost)
-	}
+	t.Run("v1alpha3", func(t *testing.T) {
+		for _, c := range cases {
+			for cluster := range tc.Kube.Clusters {
+				testName := fmt.Sprintf("%s from %s cluster", c.testName, cluster)
+				runRetriableTest(t, testName, 5, func() error {
+					resp := ClientRequest(cluster, "a", c.reqURL, 1, fmt.Sprintf("--key Host --val %s", c.host))
+					if c.reachable && !resp.IsHTTPOk() {
+						return fmt.Errorf("cannot reach %s, %v", c.reqURL, resp.Code)
+					}
 
-	exp := regexp.MustCompile("(?i)URL=(.*)")
-	paths := exp.FindAllStringSubmatch(resp.Body, -1)
-	var path string
-	if len(paths) > 1 {
-		path = paths[1][1]
-	}
-	if path != targetPath {
-		return fmt.Errorf("%s: response body contains URL=%v, expected URL=%v", failureMsg, path, targetPath)
-	}
+					if !c.reachable && resp.IsHTTPOk() {
+						return fmt.Errorf("expected request %s to fail, but got success", c.reqURL)
+					}
 
-	return nil
+					if c.reachable && c.expectedHdr != nil {
+						found := len(c.expectedHdr.FindAllStringSubmatch(resp.Body, -1))
+						if found != 1 {
+							return fmt.Errorf("public virtualService for %s is not in effect", c.reqURL)
+						}
+					}
+					return nil
+				}, c.onFailure)
+			}
+		}
+	})
 }

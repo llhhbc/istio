@@ -23,6 +23,24 @@ import (
 )
 
 // The `quota` template represents an item for which to check quota.
+//
+// Example config:
+//
+// ```yaml
+// apiVersion: "config.istio.io/v1alpha2"
+// kind: instance
+// metadata:
+//   name: requestcount
+//   namespace: istio-system
+// spec:
+//   compiledTemplate: quota
+//   params:
+//     dimensions:
+//       source: source.name | "unknown"
+//       sourceVersion: source.labels["version"] | "unknown"
+//       destination: destination.labels["app"] | destination.service.host | "unknown"
+//       destinationVersion: destination.labels["version"] | "unknown"
+// ```
 
 // Fully qualified name of the template
 const TemplateName = "quota"
@@ -32,23 +50,8 @@ const TemplateName = "quota"
 // The `quota` template represents a piece of data to check Quota for.
 //
 // When writing the configuration, the value for the fields associated with this template can either be a
-// literal or an [expression](https://istio.io/docs/reference/config/mixer/expression-language.html). Please note that if the datatype of a field is not istio.mixer.adapter.model.v1beta1.Value,
-// then the expression's [inferred type](https://istio.io/docs/reference/config/mixer/expression-language.html#type-checking) must match the datatype of the field.
-//
-// Example config:
-// ```
-// apiVersion: "config.istio.io/v1alpha2"
-// kind: quota
-// metadata:
-//   name: requestcount
-//   namespace: istio-system
-// spec:
-//   dimensions:
-//     source: source.labels["app"] | source.service | "unknown"
-//     sourceVersion: source.labels["version"] | "unknown"
-//     destination: destination.labels["app"] | destination.service | "unknown"
-//     destinationVersion: destination.labels["version"] | "unknown"
-// ```
+// literal or an [expression](https://istio.io/docs/reference//config/policy-and-telemetry/expression-language/). Please note that if the datatype of a field is not istio.policy.v1beta1.Value,
+// then the expression's [inferred type](https://istio.io/docs/reference//config/policy-and-telemetry/expression-language/#type-checking) must match the datatype of the field.
 type Instance struct {
 	// Name of the instance as specified in configuration.
 	Name string
